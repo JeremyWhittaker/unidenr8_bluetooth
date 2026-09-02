@@ -98,7 +98,8 @@ def test_an_empty_scan_explains_itself(tmp_path, capsys, monkeypatch):
     assert cli.main(["--store", str(tmp_path / "private"), "scan", "-s", "3"]) == 0
     out = capsys.readouterr().out
     assert "BT Pairing" in out
-    assert "does not advertise" in out
+    assert "not established" in out
+    assert "re-arm" in out
 
 
 def test_a_saved_report_lands_in_the_private_store_owner_only(tmp_path, monkeypatch):
@@ -128,15 +129,51 @@ def test_a_missing_bleak_is_reported_not_crashed(tmp_path, capsys, monkeypatch):
 
 
 def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
-    """`pair` changes BlueZ state and `identity` reads; neither transmits.
+    """No subcommand writes an application characteristic.
 
-    The set is pinned so a new subcommand has to be considered here rather
-    than appearing silently.
+    `pair` changes BlueZ bond state; `identity` and `live` read, and `live`
+    also writes a CCCD to subscribe. None of them writes a value to a vendor
+    characteristic, which is the invariant.
+
+    The set is pinned so a new subcommand has to be justified here rather than
+    appearing silently.
     """
     parser = cli.build_parser()
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions, "expected a subcommand action"
-    assert set(actions[0].choices) == {"plan", "selftest", "scan", "pair", "identity"}
+    assert set(actions[0].choices) == {
+        "plan", "selftest", "scan", "pair", "identity", "live",
+    }
+
+
+def test_no_subcommand_can_reach_an_application_write(tmp_path):
+    """Whatever the CLI grows, the AST audit must still come back empty."""
+    from uniden_r8.audit import audit_package
+
+    assert audit_package() == []
+
+
+def test_live_json_is_sanitized_and_parseable(tmp_path, capsys, monkeypatch):
+    from uniden_r8 import telemetry
+
+    async def fake_receive(*_args, **_kwargs):
+        return telemetry.LiveSession(
+            started_at="2026-09-02T00:00:00Z",
+            seconds=5.0,
+            connected=True,
+            compatible=True,
+        )
+
+    monkeypatch.setattr("uniden_r8.pairing.bonded_detector_address", lambda: SAMPLE)
+    monkeypatch.setattr(telemetry, "receive", fake_receive)
+    code = cli.main(
+        ["--store", str(tmp_path / "private"), "live", "--seconds", "5", "--json"]
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    payload = json.loads(captured.out)
+    assert payload["connected"] is True
+    assert SAMPLE not in captured.out + captured.err
 
 
 def test_pairing_refuses_to_act_without_explicit_confirmation(tmp_path, capsys):

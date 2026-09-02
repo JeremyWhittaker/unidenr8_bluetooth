@@ -14,9 +14,11 @@ Two things it will not do, by construction rather than by configuration:
   scans actively by default, and connections, reads and subscriptions all
   exchange frames. What none of them do is carry a command to the detector.
   See [docs/SAFETY.md](docs/SAFETY.md).
-* **It cannot disturb the OBDLink.** No `systemctl`, no serial import, no
-  `sudo`, no systemd unit, and nothing that touches `/dev/rfcomm0` or
-  `hummer-rfcomm.service`. It installs to its own tree.
+* **It does not manage or rebind the OBDLink.** No `systemctl`, no serial
+  import, no `sudo`, no systemd unit, and nothing that touches `/dev/rfcomm0`
+  or `hummer-rfcomm.service`. It installs to its own tree. BLE still shares the
+  physical controller, which is why sessions are bounded and OBD state is
+  checked before and after hardware runs.
 
   One module — `pairing.py` — does run an external program: `bluetoothctl`,
   and only through a strict guard. Fixed binary, no shell, a short verb
@@ -29,7 +31,8 @@ Two things it will not do, by construction rather than by configuration:
 
 ## Status
 
-Phase 1 (read-only discovery) is complete and the detector has been seen.
+Live data is flowing. Discovery, pairing, identity and the bounded receive path
+all work against the real detector.
 
 | | |
 |---|---|
@@ -38,18 +41,22 @@ Phase 1 (read-only discovery) is complete and the detector has been seen.
 | Address type | Random static |
 | Signal from the node | −69 dBm |
 | Vendor service UUIDs in the advertisement | None — but see below |
-| Paired | Yes — first attempt, left **untrusted** and disconnected |
-| Model / Manufacturer (0x2A24 / 0x2A29) | `BTM10` / `ATTOWAVE` — the BLE module, not the detector |
+| Paired | Yes — first attempt with the final persistent agent, left **untrusted** and disconnected |
+| Model / Manufacturer (0x2A24 / 0x2A29) | `BTM10` / `ATTOWAVE` — exact returned strings; interpreting them as a Bluetooth module is unverified |
 | Software revision (0x2A28) | `R8/143/113/126/107/20260702/999/999/113` |
 | Firmware | **1.43** — the current official release. No update needed. |
 | Vendor services on connect | **Both present**, and every individual vendor characteristic UUID matches upstream's R8w table |
+| Live telemetry | **30 packets in 30 s**, ~1.0 s interval, 31/31 parsed |
+| Battery voltage | 13.6 V, GPS locked |
+| Telemetry payload format | **Confirmed** — matches upstream's R8w layout exactly |
+| Alert payload format | Unconfirmed — only an all-clear packet has been seen |
 | OBD invariants | Unchanged, verified before and after every operation |
 
 The GATT attribute table this project carries came from a different model —
-upstream's Uniden **R8w**. Service discovery has now confirmed every vendor
-**UUID** on Jeremy's R8, so the attribute table applies. **Payload formats have
-not been confirmed**: no vendor characteristic has been read here, so the packet
-layouts stay R8w evidence.
+upstream's Uniden **R8w**. Service discovery confirmed every vendor **UUID** on
+Jeremy's R8. The bounded hardware capture then confirmed the seven-field
+**telemetry** shape on this R8. Active-alert fields, POI, and settings remain
+R8w evidence rather than assumptions presented as fact.
 
 Two differences from the R8w are established: the advertised name is `R8@`, not
 `R8W@`, and `0x2A24`/`0x2A29` return `BTM10`/`ATTOWAVE` rather than naming the
@@ -64,14 +71,28 @@ uniden-r8 selftest    # prove the no-application-write properties. No radio.
 uniden-r8 scan        # bounded advertisement-only discovery. Sanitized.
 uniden-r8 pair        # bond with the detector. Needs --confirm.
 uniden-r8 identity    # GATT-read the Device Information characteristics.
+uniden-r8 live        # bounded receive-only telemetry and alerts.
+```
+
+```
+$ uniden-r8 live --seconds 30
+live receive 2026-09-02T04:15:55Z, window 30s
+
+packets: 30 telemetry, 0 alert
+
+  13.6 V     GPS locked
+
+alerts: 0
+  clear
 ```
 
 `plan` and `selftest` use no radio at all. `scan` uses it for
-advertisement-only discovery and never connects. `pair` and `identity` do
-connect — and `pair` is the one command that runs `bluetoothctl` and changes
+advertisement-only discovery and never connects. `pair`, `identity` and `live`
+do connect — and `pair` is the one command that runs `bluetoothctl` and changes
 persistent state, which is why it refuses to act without `--confirm` and fails
-loudly if the result is left trusted or connected. None of them writes an
-application characteristic.
+loudly if the result is left trusted or connected. `live` writes a CCCD to
+subscribe, which is a protocol descriptor write. **None of them writes a value
+to an application characteristic**, and none reads POI or settings.
 
 ```
 $ uniden-r8 scan --seconds 25
@@ -107,11 +128,12 @@ machine with no Bluetooth stack.
 | `src/uniden_r8/privacy.py` | Salted tokenisation of addresses and names. |
 | `src/uniden_r8/evidence.py` | The `0700`/`0600` private store, and the publish gate. |
 | `src/uniden_r8/discovery.py` | Bounded, advertisement-only discovery. |
-| `src/uniden_r8/cli.py` | `plan`, `selftest`, `scan`, guarded `pair`, and read-only `identity`. |
+| `src/uniden_r8/cli.py` | `plan`, `selftest`, `scan`, guarded `pair`, read-only `identity`, and bounded `live`. |
 | `docs/SAFETY.md` | The boundary: OBD invariants, read-only rules, privacy. |
 | `docs/EVIDENCE.md` | Every claim, with its source and its grade. |
 | `src/uniden_r8/pairing.py` | Guarded `bluetoothctl` driver. Protects the OBDLink bond. |
 | `src/uniden_r8/identity.py` | Connected Device Information reads. No characteristic writes. |
+| `src/uniden_r8/telemetry.py` | Bounded receive-only live data. Telemetry and alerts only. |
 | `docs/RUNBOOK.md` | Firmware check, deploy, discovery, and what to do when it is empty. |
 | `docs/REQUIREMENTS.md` | Parent-review checklist with status and evidence. |
 

@@ -18,9 +18,10 @@ Serial Port Profile device bound to ``/dev/rfcomm0`` by
 ``hummer-rfcomm.service``, and nothing here imports a serial library, touches
 that device node, or manages that unit.
 
-Nothing at this level imports :mod:`bleak`.  The gate, the redaction and the
-classification are testable on a machine with no Bluetooth stack, and only
-:func:`uniden_r8.discovery.scan` reaches for a radio.
+Nothing at this level imports :mod:`bleak`. The gate, redaction and
+classification remain testable without a Bluetooth stack; the discovery,
+identity and telemetry modules import their radio dependencies lazily at the
+operation that needs them.
 """
 
 from __future__ import annotations

@@ -220,8 +220,8 @@ def test_identity_is_reachable_without_any_application_write():
         assert not gatt.describe(uuid).device_accepts_writes
 
 
-def test_nothing_claims_to_have_been_observed_on_this_detector_yet():
-    """Unknown stays unknown until the hardware answers."""
+def test_catalogue_keeps_source_provenance_separate_from_runtime_evidence():
+    """Hardware confirmation is recorded in the ledger, not by erasing origin."""
     assert not [c for c in gatt.CATALOGUE if c.evidence is gatt.Evidence.OBSERVED]
 
 

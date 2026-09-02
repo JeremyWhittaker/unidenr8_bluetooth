@@ -24,7 +24,8 @@ Deliberately not read
 * **The POI characteristic.** It carries saved coordinates — home, work, the
   roads Jeremy drives. Identity does not need it.
 * **Anything vendor-specific.** Not required to answer the model and firmware
-  question, and every vendor UUID is still R8w evidence rather than fact.
+  question. The project later confirmed the UUID layout and telemetry shape,
+  but this identity operation remains confined to Device Information.
 """
 
 from __future__ import annotations

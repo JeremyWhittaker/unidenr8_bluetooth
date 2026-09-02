@@ -9,12 +9,11 @@ Two jobs, deliberately in one file so they cannot drift apart:
 Provenance matters more than usual here.  Everything in the vendor-specific
 half of this table comes from one person's reverse engineering of one *R8w*
 (``AegisX86/UnidenR8wlink``, commit ``9072bc2f``), and Jeremy's detector is a
-plain **R8**, a different model whose own owner's manual -- Issue 3, March
-2024 -- does not mention Bluetooth at all.  Nothing here may be presented as
-established fact about the R8 until the R8 answers.  Each entry therefore
-carries an :class:`Evidence` grade, and the grades are load-bearing: the
-Phase 2 probe plan is built from ``OFFICIAL`` and ``UPSTREAM`` entries only,
-and reports what it actually saw rather than what this table predicted.
+plain **R8**, a different model whose March 2024 owner's manual predates the
+current Bluetooth/R/Tach documentation. Each entry retains its source
+provenance. Runtime observations on Jeremy's R8 are recorded separately in
+``docs/EVIDENCE.md`` so later confirmation does not erase where a definition
+originally came from.
 
 The gate
 --------
@@ -91,16 +90,17 @@ class Evidence(StrEnum):
         support article.  Cited in :doc:`../docs/EVIDENCE.md`.
     ``UPSTREAM``
         Read out of ``AegisX86/UnidenR8wlink`` at commit ``9072bc2f``, whose
-        author confirmed it against a real **R8w**.  Not confirmed on an R8.
+        author confirmed it against a real **R8w**. Runtime confirmation on
+        this R8 is tracked separately in the evidence ledger.
     ``UPSTREAM_UNVERIFIED``
         Present in that upstream, but documented there as untested even on
         the R8w -- decompiled from the app and never sent to hardware.
     ``INFERENCE``
         This project's reasoning.  Not observed anywhere.
     ``OBSERVED``
-        Seen on Jeremy's own detector by this project.  Nothing carries this
-        grade until the hardware answers; it is here so that the probe has a
-        grade to promote an entry to, rather than a place to quietly edit.
+        Seen on Jeremy's own detector by this project. The catalogue currently
+        retains source provenance while the evidence ledger records observed
+        runtime results.
     """
 
     OFFICIAL = "official"
@@ -177,8 +177,8 @@ CATALOGUE: Final[tuple[Characteristic, ...]] = (
         device_accepts_writes=False,
         evidence=Evidence.OFFICIAL,
         note=(
-            "Bluetooth SIG characteristic 0x2A26.  A plain GATT read; the "
-            "R8w returns a slash-delimited string.  The R8's value is unknown."
+            "Bluetooth SIG characteristic 0x2A26. A plain GATT read; this "
+            "R8 returned eight literal NA placeholders."
         ),
     ),
     Characteristic(
@@ -362,9 +362,10 @@ LIVE_READ_UUIDS: Final[frozenset[str]] = frozenset({TELEMETRY_UUID, ALERT_UUID})
 LIVE_NOTIFY_UUIDS: Final[frozenset[str]] = frozenset({TELEMETRY_UUID, ALERT_UUID})
 
 #: Vendor attributes that must actually be present on the connected device
-#: before the receive path will run.  Upstream documented these on an *R8w*;
-#: this project has confirmed the service on Jeremy's R8 but not the
-#: characteristics, so the gate checks rather than assumes.
+#: before the receive path will run. Upstream documented these on an *R8w*;
+#: this project has since observed the exact service/characteristic layout on
+#: Jeremy's R8, but the gate still checks every connection so firmware drift is
+#: refused rather than assumed compatible.
 REQUIRED_LIVE_ATTRIBUTES: Final[tuple[str, ...]] = (
     DATA_SERVICE_UUID,
     TELEMETRY_UUID,

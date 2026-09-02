@@ -115,8 +115,8 @@ class Advertisement:
     ``service_uuids`` is the highest-value thing an advertisement can carry
     here.  If the detector advertises the Uniden data service, that is
     evidence the vendor attribute table matches upstream's R8w *before*
-    anything connects to it -- which is exactly the question Phase 1 exists to
-    narrow down, and it costs nothing but listening.
+    anything connects to it. Discovery is advertisement-only, but BlueZ scans
+    actively and may send a link-layer scan request.
     """
 
     address: str

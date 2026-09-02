@@ -1,6 +1,6 @@
 """Command line entry points.
 
-Three subcommands, and only one of them touches a radio:
+The command surface is deliberately small:
 
 ``plan``
     Print the read-only probe plan and the refusal list.  No hardware, no
@@ -16,10 +16,15 @@ Three subcommands, and only one of them touches a radio:
 ``scan``
     One bounded advertisement-only discovery window.  Prints a sanitized
     report.  Active scanning, as BlueZ does by default; no connection.
+``pair``
+    One explicitly confirmed, guarded BlueZ bond operation.
+``identity``
+    One bounded connection reading only standard Device Information values.
+``live``
+    One bounded connection reading and subscribing only to telemetry/alerts.
 
-``scan`` is the only subcommand that can be slow, and its slowness is bounded
-by :mod:`uniden_r8.scan`.  Nothing here loops, retries forever, or runs as a
-service; the assignment's Phase 1 ends at a single scan window.
+Every radio operation is bounded. Nothing here retries forever or runs as a
+service.
 """
 
 from __future__ import annotations
@@ -129,6 +134,21 @@ def build_parser() -> argparse.ArgumentParser:
         "identity", help="GATT-read the Device Information characteristics"
     )
     identity_parser.add_argument("-s", "--seconds", type=float, default=20.0)
+
+    live_parser = sub.add_parser(
+        "live", help="bounded receive-only live telemetry and alerts"
+    )
+    live_parser.add_argument(
+        "-s", "--seconds", type=float, default=None,
+        help="collection window, clamped to 5-120 s (default: 30)",
+    )
+    live_parser.add_argument(
+        "--json", action="store_true", help="emit the sanitized session as JSON"
+    )
+    live_parser.add_argument(
+        "--save", metavar="NAME",
+        help="also write the sanitized session into the private store under NAME",
+    )
     return parser
 
 
@@ -230,10 +250,9 @@ def _render(report) -> str:
         lines += [
             "No R-series candidate advertised in this window.",
             "",
-            "That is the expected result unless the detector is in BT Pairing",
-            "mode or is already paired and idle: an unpaired Uniden R-series",
-            "detector does not advertise at all otherwise, and a paired one",
-            "stops the moment anything connects to it.",
+            "Upstream's R8w advertises while in BT Pairing or while paired and",
+            "idle. This R8's behaviour outside pairing mode is not established;",
+            "re-arm BT Pairing, and make sure a phone is not holding its link.",
         ]
     else:
         lines.append("tier      name                   token          signal")
@@ -417,6 +436,40 @@ def _cmd_identity(store_path: str, seconds: float, address: str | None = None) -
     return 0 if identity.connected else 1
 
 
+def _cmd_live(store_path: str, seconds: float | None, as_json: bool,
+              save: str | None) -> int:
+    from .pairing import PairingRefused, bonded_detector_address
+    from .telemetry import receive
+
+    store = PrivateStore(store_path).ensure()
+    salt = store.salt
+
+    try:
+        address = bonded_detector_address()
+    except (LookupError, PairingRefused) as exc:
+        print(publish(str(exc)), file=sys.stderr)
+        return 1
+
+    print(
+        f"receiving from the bonded detector {redact_address(address, salt)}",
+        file=sys.stderr if as_json else sys.stdout,
+    )
+    try:
+        session = asyncio.run(receive(address, salt, store, seconds))
+    except ImportError:
+        print("bleak is not installed in this environment.", file=sys.stderr)
+        return 2
+
+    if save:
+        store.write_json(save, session.as_dict())
+
+    output = json.dumps(session.as_dict(), indent=2) if as_json else session.render()
+    print(publish(output))
+    if not session.connected:
+        return 1
+    return 0 if session.compatible else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "plan":
@@ -431,6 +484,8 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "identity":
         return _cmd_identity(args.store, args.seconds)
+    if args.command == "live":
+        return _cmd_live(args.store, args.seconds, args.json, args.save)
     return 2  # pragma: no cover - argparse rejects unknown subcommands first
 
 

@@ -47,8 +47,8 @@ mis-parsed.
 | Vacuity guard | `test_the_enumeration_is_not_vacuous`, plus an in-test assertion that the path list is non-empty |
 | NUL safety | `test_the_enumeration_survives_an_awkward_filename`, against a scratch repo |
 
-Note: the unchanged-tracked-file test **skips** while nothing is committed,
-which is the current state. It becomes active on the parent's first commit.
+The parent committed checkpoint `ca60984`; the unchanged-tracked-file test is
+now active and passes rather than taking its bootstrap skip.
 
 ## 3. Bounded connected identity probe — **implemented, not run again**
 
@@ -71,41 +71,33 @@ which is the current state. It becomes active on the parent's first commit.
 pairing window the parent coordinated; those results are in
 `docs/EVIDENCE.md` §6. It has not been run since.
 
-## 4. Bounded receive-only vendor-data phase — **deferred**
+## 4. Bounded receive-only vendor-data phase — **implemented and run**
 
-Deferred at the parent's explicit instruction, twice: *"Before adding
-receive-path files, stop at a green pairing/identity checkpoint"* and *"Do not
-create the receive module yet."*
+`src/uniden_r8/telemetry.py` plus the `live` subcommand. Released by the parent
+in `live-receive-task.md` and run once against the real detector.
 
-**No receive module exists.** `src/uniden_r8/telemetry.py` was not created.
+| Requirement | Status | Evidence |
+|---|---|---|
+| Exact service/characteristic compatibility gate before access | implemented | `check_compatibility` against the live client; `test_the_gate_refuses_a_device_without_the_vendor_service`, `..._missing_the_telemetry_characteristic`, `..._checks_the_live_device_not_the_catalogue`. Gate failure reads nothing: asserted. |
+| Only confirmed alert and telemetry characteristics | implemented | `LIVE_READ_UUIDS` / `LIVE_NOTIFY_UUIDS`; `test_only_telemetry_and_alert_are_read`, `..._subscribed` |
+| Never read POI/settings | implemented | `test_poi_and_settings_are_refused_by_the_gate_itself` — refused by `assert_live_readable` even though the probe allowlist admits them |
+| No application-characteristic write, no opt-in escape hatch | implemented | AST audit clean; `test_the_fake_client_has_no_write_method`; no `allow_writes` anywhere |
+| Document that `start_notify` changes CCCD/link state | implemented | `docs/SAFETY.md` "The receive path"; module docstring; README |
+| Raw payloads and identifiers stay private | implemented | `test_raw_payloads_land_in_the_private_store_owner_only`, `..._are_not_in_the_published_output`, `test_the_session_output_carries_no_identifier` |
+| Conservative published fields | implemented | `test_no_published_field_carries_position` — heading/speed/altitude/POI detail absent; `test_raw_payloads_are_not_in_the_published_output` asserts altitude never reaches output |
+| Evidence-graded parsing | implemented | Telemetry's observed seven-field shape is enforced; active-alert values remain upstream evidence. Unknown telemetry/alert packets get separate counters and are not reflected into public output. |
+| Bounded session, deterministic teardown incl. partial failure and timeout | implemented | 5–120 s clamp plus connect/cleanup overhead; `test_a_failed_subscription_does_not_stop_the_other`, `test_timeout_unsubscribes_and_disconnects_after_partial_setup`, and the other teardown/timeout tests |
+| No daemon or systemd service | implemented | Runs once and exits; no unit shipped |
+| Bounded real capture | done | 30 s window, 32 packets; see `docs/EVIDENCE.md` §7 |
 
-One piece of groundwork was added to the *gate* rather than to a receive path:
-`gatt.LIVE_READ_UUIDS`, `gatt.LIVE_NOTIFY_UUIDS`, `gatt.REQUIRED_LIVE_ATTRIBUTES`
-and the two `assert_live_*` helpers. These add **refusals**, not capability —
-they narrow the permitted set to telemetry and alert, and make POI and the two
-settings characteristics raise even though the wider probe allowlist would
-admit them. Flagged here explicitly so the parent can strip them if the
-checkpoint is meant to be strictly frozen.
-
-Design settled for the next phase:
-
-* proceed only behind a compatibility gate requiring the connected unit to
-  expose the vendor service and the telemetry/alert characteristics — now known
-  to be present (§1 below), though payload formats remain unconfirmed;
-* GATT-read telemetry/alert, and `start_notify` only on those two allowlisted
-  UUIDs, with the CCCD write described accurately as a protocol descriptor
-  write;
-* treat a parse failure as **expected**: the packet layouts are R8w evidence and
-  have not been confirmed on this unit;
-* **never** read POI or settings by default — POI carries saved coordinates;
-* bound the session and prove teardown;
-* raw payloads to the owner-only private store; publish only identifier-safe
-  metadata and conservative parsed fields;
-* no background service.
+**Result: the telemetry payload format is now confirmed on this R8** — 31/31
+packets parsed, 7 fields each, 4-field GPS group, ~1.0 s interval. The **alert**
+format remains unconfirmed: only an all-clear packet was seen.
 
 ## 5. Comprehensive DI/fake tests, lint, docs — **implemented** (for phases 1–3)
 
-212 tests, 1 skipped. Ruff clean across `src` and `tests`.
+279 tests locally after parent hardening; 270 passed / 9 skipped on the Pi.
+Ruff is clean across `src` and `tests`, and the Pi selftest passes.
 
 | Area | Test file |
 |---|---|
@@ -117,20 +109,17 @@ Design settled for the next phase:
 | Redaction, salt permissions | `test_privacy.py` |
 | Private store modes, publish gate | `test_evidence_store.py` |
 | Repository hygiene enumeration | `test_repo_hygiene.py` |
-| CLI surface, confirmation gate | `test_cli.py` |
-
-Vendor-UUID compatibility gate and notification allowlist tests are **deferred**
-with finding 4 — there is no receive path to test yet.
+| CLI surface, confirmation gate, pairing postconditions | `test_cli.py` |
+| Receive path: gate, allowlists, teardown, parsing, privacy | `test_telemetry.py` |
 
 Docs updated: `README.md`, `docs/SAFETY.md` (new §1a on the pairing guards),
-`docs/RUNBOOK.md`, `docs/EVIDENCE.md` (§6 observations), and this file.
+`docs/RUNBOOK.md`, `docs/EVIDENCE.md` (§§6–7 observations), and this file.
 
 ## 6. Code-only redeploy, Pi tests/selftest, OBD invariants — **implemented**
 
-No scan, no connect, no pair. See the final summary artifact for the captured
-before/after invariants.
-
----
+The live phase used the existing bond for one bounded connection; it did not
+scan or pair. See the final summary artifact for captured before/after
+invariants.
 
 ---
 
@@ -157,9 +146,8 @@ before/after invariants.
 |---|---|
 | Do not claim/release the Foreman baton | not applicable — untouched |
 | Do not spawn agents or subagents | honoured — all work done directly |
-| Do not commit or push | honoured — tree is untracked; parent ships |
-| Do not pair again | honoured — no pairing after the review |
-| Do not run a connected hardware probe | honoured — no connect since the review |
-| Do not scan again | honoured |
+| Do not commit or push | worker honoured it; parent committed/pushed the green identity checkpoint and ships the reviewed live checkpoint |
+| Do not pair again | honoured — the existing bond was reused; no pairing performed |
+| Do not scan again | honoured — the detector resolves from BlueZ bond state |
 | No `sudo` | honoured — nothing needed it |
 | Preserve OBD invariants | honoured — rechecked; see final summary |

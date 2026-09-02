@@ -146,9 +146,9 @@ python3 -m venv .venv          # PEP 668 marks the system Python externally
 .venv/bin/pip install bleak pytest
 ```
 
-`bleak` is an *optional* dependency here. The safety gate, the redaction and
-the classification all import and test without it; only the live scan needs a
-radio.
+`bleak` is an *optional* dependency here. The safety gate, redaction and
+classification import and test without it; the scan, identity and live
+operations load it only when they use the radio.
 
 ---
 
@@ -186,9 +186,11 @@ detector's state.
 
 ### Arm the detector first
 
-An unpaired Uniden R-series detector **does not advertise at all** unless it is
-in pairing mode, and a paired one stops advertising the moment anything
-connects to it. Scanning before arming just times out and looks broken.
+Upstream observed that its **R8w** advertises only in pairing mode when
+unpaired, or while paired and idle. This R8's advertising behaviour outside
+pairing mode was not established because it was re-armed during discovery.
+Re-arming is therefore the reliable way to make a discovery scan useful; a
+connected phone can still make the detector disappear from the scan.
 
 On the detector: **MENU → cycle to `BT Pairing` → MENU**. The display shows a
 pairing message. The window closes on its own after a while, so start the scan
@@ -229,19 +231,63 @@ Re-run the OBD invariant checks from step 1. They must be identical.
 
 ---
 
-## Step 5 — stop
+## Step 5 — pull live data
 
-Phase 1 ends here. Pairing the detector, connecting, service discovery and
-characteristic reads are later phases and need their own review — pairing is a
-persistent change to BlueZ state on a node whose Bluetooth stack the vehicle
-depends on.
+Only once the detector is bonded (see the evidence ledger; it already is).
+
+```bash
+cd "$UNIDEN_ROOT"
+.venv/bin/python -m uniden_r8.cli live --seconds 30 --save live-session.json
+```
+
+It resolves the detector from BlueZ's existing bond state — no discovery, and
+the address is never written down — connects, checks the compatibility gate,
+GATT-reads telemetry and alert once, subscribes to both, collects for the
+window, and tears the link down.
+
+The window is clamped to 5–120 s. There is no daemon: this runs once and exits.
+
+Expected output on a parked vehicle with no radar around:
+
+```
+packets: 30 telemetry, 0 alert
+
+  13.6 V     GPS locked
+
+alerts: 0
+  clear
+```
+
+Reading it:
+
+* **`packets: N telemetry`** — roughly one per second. Zero means the link came
+  up but nothing streamed; check the detector is on and no phone has taken it.
+* **`M telemetry unparsed`** — appears only when packets did not fit the
+  expected shape. Raw bytes are in a timestamped `.private/live-raw-*.json`;
+  that is a
+  firmware-format change worth investigating, not a crash.
+* **`Device does not expose the required attributes`** — the compatibility gate
+  refused. Nothing was read. Re-run `identity` and compare the service list.
+* **`alerts: 0 / clear`** — no detections. This is the normal state.
+
+Raw payloads land in `.private/`, `0600`. Nothing printed contains an address,
+and heading, speed and altitude are deliberately absent from the output.
+
+Afterwards, re-run the OBD invariant checks from step 1.
+
+## Step 6 — stop
+
+The live path runs once and exits. Turning it into a background collector — a
+systemd unit, a database, a display — is a separate piece of work and needs its
+own review: a service holding the BLE link continuously has a very different
+relationship with the shared radio than a 30-second window does.
 
 ---
 
 ## Privileged commands, if they are ever needed
 
-This project runs no `sudo`. Nothing in Phase 1 required any privileged
-command: the venv, the tree and the BLE scan are all unprivileged.
+This project runs no `sudo`. Discovery, pairing, identity and the bounded live
+capture all completed as the ordinary `jeremy` user.
 
 If a later phase needs one, it is recorded here for Jeremy to run, and is not
 executed by any agent:
@@ -251,7 +297,7 @@ executed by any agent:
 | `rfkill list bluetooth` shows soft-blocked | `sudo rfkill unblock bluetooth` | Not currently blocked on this node — `hci0` is `UP RUNNING`. |
 | `bluetoothctl pair` fails `AccessDenied` or "Rejected send message" | `sudo usermod -aG bluetooth $USER`, then log out and back in | Only if a `bluetooth` group exists and gates pairing. This node has no such group, and scanning works without it. |
 
-Neither is needed today. Scanning is unprivileged, and pairing is not Phase 1.
+Neither is needed today.
 
 ---
 

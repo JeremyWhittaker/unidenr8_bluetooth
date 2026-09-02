@@ -231,10 +231,10 @@ UUIDs, not merely their counts. Every vendor UUID upstream documented on an
 | Generic Access `00001800-…` | 0x2A00, 0x2A01 | standard SIG |
 | Generic Attribute `00001801-…` | 0x2A05 (Service Changed) | standard SIG |
 
-**This confirms UUID *presence* only.** It says nothing about payload format:
-no vendor characteristic has been read on this unit, so the packet layouts in
-§3 remain R8w evidence. A matching UUID is a strong indication the same
-firmware family is behind it; it is not proof the bytes are shaped the same.
+**At this checkpoint, this confirmed UUID *presence* only.** A matching UUID
+was not proof that the bytes were shaped the same. The later bounded receive
+in §7 confirms the telemetry layout on this R8; active-alert fields, POI and
+settings remain unconfirmed.
 
 ### Device Information, read verbatim
 
@@ -300,10 +300,10 @@ R8, and every individual vendor characteristic UUID upstream documented on the
 R8w is present, with nothing extra. §3's service and characteristic UUIDs are
 confirmed on this unit.
 
-**Payload formats are still unconfirmed.** No vendor characteristic has been
-read here. Every packet layout in §3 — telemetry fields, alert fields, POI
-records, the settings blocks — remains R8w evidence, and the receive phase must
-treat a parse failure as expected rather than exceptional.
+**UUID presence did not by itself confirm payload formats.** The subsequent
+receive in §7 confirms the telemetry field shape on this R8. It does not
+confirm active-alert fields, POI records or settings blocks, and parsers still
+treat an unknown shape as evidence rather than forcing it into a guess.
 
 **Two differences from the R8w are established**, neither predictable from
 upstream: the advertised name is `R8@` rather than `R8W@`, and 0x2A24/0x2A29
@@ -316,3 +316,42 @@ neither is the cause of the earlier `AuthenticationCanceled` failures (6.9).
 Both were claimed in an earlier draft on evidence that could not support them.
 
 ---
+
+---
+
+## 7. Live data, observed on Jeremy's R8
+
+One bounded 30-second receive window from the node, 2026-09-02T04:15:55Z.
+Connected to the existing bond, GATT-read telemetry and alert once, subscribed
+to both, collected, and tore the link down. POI and settings were never read.
+
+| # | Observation | Grade |
+|---|---|---|
+| 7.1 | The detector streams telemetry over BLE to this node. **32 packets** captured: 1 telemetry read, 1 alert read, 30 telemetry notifications. | OBSERVED |
+| 7.2 | Telemetry notification interval is **~1.0 s** (measured 0.97–1.02 s between consecutive packets). Consistent with upstream's "every 1-2 seconds". | OBSERVED |
+| 7.3 | **The telemetry payload layout matches upstream's R8w format.** 31 of 31 telemetry payloads parsed, every one with exactly **7** `&`-separated fields, and the GPS group carrying exactly **4** comma-separated sub-fields. | OBSERVED |
+| 7.4 | Battery voltage read **13.6 V**, steady across all 31 packets. | OBSERVED |
+| 7.5 | GPS reported a fix for the whole window. | OBSERVED |
+| 7.6 | The alert characteristic returned an all-clear packet, and sent no notifications in the window. Expected with no radar source present. | OBSERVED |
+
+### What 7.3 upgrades, and what it does not
+
+The **telemetry** packet format in §3 moves from `upstream-r8w` to confirmed on
+this R8: the field count, the GPS sub-group shape and the voltage position all
+hold, and the parser had a 100% success rate over 31 packets.
+
+The **alert** packet format is still unconfirmed. The only alert payload seen
+was all-clear, which exercises none of the band, strength, frequency, direction
+or mute fields. Those stay `upstream-r8w` until a real detection is captured.
+
+The **POI** and **settings** formats remain entirely unconfirmed and untested,
+because this project does not read those characteristics.
+
+### Not published
+
+The raw payloads are in the node's owner-only private store. Heading, speed,
+altitude and the details of any POI warning are parsed nowhere and published
+nowhere — they describe where Jeremy is and where he has been, and none of them
+is needed to answer what the detector is currently reporting. Published output
+carries voltage, GPS-fix state, a POI-warning boolean, and the alert fields a
+radar detector exists to report.

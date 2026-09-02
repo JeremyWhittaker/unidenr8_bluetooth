@@ -79,7 +79,7 @@ a radar detector — and is reported rather than guessed at.
 
 ---
 
-### Why an LE scan cannot disturb the RFCOMM bond
+### Why the bounded LE scan does not mutate RFCOMM state
 
 `hci0` is one radio serving both. An LE discovery session and an established
 BR/EDR link coexist — the controller interleaves them — but a *long* discovery
@@ -144,7 +144,9 @@ absent one.
 * **GATT Read** of the characteristics in `gatt.READABLE_UUIDS`.
 * **Subscribing** to the characteristics in `gatt.NOTIFY_UUIDS`.
 
-Phase 1 uses only the first of those.
+The scan uses only the first operation. Identity uses standard Device
+Information reads. The bounded live path uses only telemetry/alert reads and
+subscriptions through its narrower allowlist.
 
 ### What is refused
 
@@ -197,6 +199,58 @@ It runs three ways:
 * `test_the_package_contains_no_application_write_path`, in CI or by hand; and
 * `test_the_audit_actually_catches_a_write`, which proves the control can fail,
   because a check that cannot fail proves nothing.
+
+### The receive path
+
+`uniden_r8/telemetry.py` is the live-data phase, and it narrows the boundary
+rather than widening it.
+
+**A compatibility gate runs before anything is accessed.** The vendor UUIDs
+were documented on an R8w. Service discovery has confirmed them on Jeremy's R8,
+but the module still checks the connected device each time: a firmware update
+could move the table, and a gate that is only correct today is not a gate. If a
+required attribute is absent it stops, reads nothing, and reports what was
+missing.
+
+**A narrower allowlist than the probe's.** `gatt.LIVE_READ_UUIDS` and
+`gatt.LIVE_NOTIFY_UUIDS` contain telemetry and alert, and nothing else.
+`assert_live_readable` refuses POI and both settings characteristics **even
+though the wider probe allowlist would admit them** — POI holds saved camera and
+user-mark coordinates, settings hold device configuration, and neither is needed
+to pull live data. The gate is called per-UUID at the call site, so editing the
+loop cannot smuggle one in.
+
+**Subscribing writes a CCCD.** That is a protocol descriptor write and it is
+the only write of any kind this module performs. It is how a GATT client says
+"send me updates"; it carries no application command. The invariant remains *no
+application-characteristic payload write*, not *no RF writes*.
+
+**Bounded, with deterministic teardown.** The window is clamped to 5–120 s and
+the whole session sits under `window + 25 s connect timeout + 10 s cleanup`.
+Teardown unsubscribes
+every subscription that was actually established — including when the other one
+failed or the outer ceiling cancels the session — and `async with` releases the
+link even if a read raises or the gate refuses. Partial raw evidence is saved
+on cancellation. A held link matters: the detector stops advertising while
+connected.
+
+**Notification handlers never raise.** An exception on bleak's notification
+path disappears into the BLE machinery and takes the subscription with it, so
+both handlers swallow everything.
+
+**Compatibility is evidence-graded.** The telemetry shape is now observed on
+this R8, while active-alert fields remain R8w evidence. Any packet that does
+not fit a recognised shape is recorded as unparsed, with its raw bytes kept,
+rather than reflected into public output. Separate telemetry and alert
+unparsed counters make that visible instead of silent.
+
+**Published output is conservative.** Raw payloads go to the owner-only private
+store. Published output carries voltage, GPS-fix state, a POI-warning boolean,
+and the alert fields a detector exists to report. Heading, speed, altitude and
+POI detail are parsed nowhere and published nowhere: they describe where Jeremy
+is and has been.
+
+There is no background service and no systemd unit.
 
 ### If a write is ever wanted
 
@@ -252,9 +306,8 @@ is published without a specific decision.
 
 This project never runs `sudo`.
 
-The Phase 1 work needs none: a user-owned venv, a user-owned tree under
-`/home/jeremy/unidenr8`, and BLE scanning, which BlueZ permits to an
-unprivileged user over D-Bus.
+The completed discovery, pairing, identity and bounded live capture needed
+none: the user-owned venv/tree and BlueZ D-Bus access were sufficient.
 
 If a genuinely missing privileged dependency appears, it is recorded as an
 exact minimal command for Jeremy to run — never executed here, and never
