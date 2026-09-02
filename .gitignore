@@ -1,0 +1,31 @@
+# Foreman runtime state is local orchestration metadata, not project source.
+.foreman/
+
+# Anything that could carry a Bluetooth address, a serial, a device name with
+# an embedded identifier, a host address, or a raw BLE capture.  Nothing under
+# .private/ is ever publishable; see docs/SAFETY.md for the rule.
+.private/
+captures/
+*.pcap
+*.pcapng
+*.btsnoop
+*.raw
+
+# Scan and probe reports are runtime state.  Even the sanitized ones go stale
+# the moment the radio environment changes, and the unsanitized ones must not
+# exist outside .private/.  docs/EVIDENCE.md is the curated, publishable form.
+reports/
+*.report.json
+
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+dist/
+build/
+*.egg-info/

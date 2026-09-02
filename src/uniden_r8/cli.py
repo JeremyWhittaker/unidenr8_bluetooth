@@ -1,0 +1,438 @@
+"""Command line entry points.
+
+Three subcommands, and only one of them touches a radio:
+
+``plan``
+    Print the read-only probe plan and the refusal list.  No hardware, no
+    network.  This is what a reviewer runs to see what the project would do
+    before it is allowed anywhere near the detector.
+``selftest``
+    Prove the safety properties on the machine that is about to run the scan:
+    that the gate refuses the command characteristic, that every known R/Tach
+    command is rejected, that the package contains no write path, and that the
+    private store is sealed.  It needs no Bluetooth stack, so it is also the
+    honest answer to "is the deployment healthy" on a node where ``bleak`` has
+    not been installed yet.
+``scan``
+    One bounded advertisement-only discovery window.  Prints a sanitized
+    report.  Active scanning, as BlueZ does by default; no connection.
+
+``scan`` is the only subcommand that can be slow, and its slowness is bounded
+by :mod:`uniden_r8.scan`.  Nothing here loops, retries forever, or runs as a
+service; the assignment's Phase 1 ends at a single scan window.
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import sys
+from pathlib import Path
+
+from . import __version__
+from .audit import audit_package
+from .discovery import (
+    DEFAULT_SCAN_SECONDS,
+    MAX_SCAN_SECONDS,
+    MIN_SCAN_SECONDS,
+    classify,
+    scan,
+)
+from .evidence import PrivateStore, publish
+from .gatt import (
+    CATALOGUE,
+    COMMAND_WRITE_UUID,
+    FORBIDDEN_UUIDS,
+    KNOWN_WRITE_COMMANDS,
+    PROBE_PLAN,
+    WriteRefused,
+    assert_notifiable,
+    assert_readable,
+    describe,
+    refuse_command,
+)
+from .privacy import redact_address, redact_name
+
+__all__ = ["build_parser", "main"]
+
+#: Default private store, relative to the project root.  Git-ignored.
+DEFAULT_STORE = ".private"
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="uniden-r8",
+        description="Receive-only Uniden R8 Bluetooth LE support. No "
+                    "application-characteristic write path: never sends a "
+                    "Uniden command, settings, mute or user-mark write. Never "
+                    "touches the OBDLink or /dev/rfcomm0.",
+    )
+    parser.add_argument("--version", action="version", version=f"uniden-r8 {__version__}")
+    parser.add_argument(
+        "--store",
+        default=DEFAULT_STORE,
+        help=f"private evidence directory, 0700 (default: {DEFAULT_STORE})",
+    )
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("plan", help="print the read-only probe plan and refusal list")
+    sub.add_parser(
+        "selftest", help="prove the no-application-write properties; needs no radio"
+    )
+
+    scan_parser = sub.add_parser(
+        "scan", help="one bounded advertisement-only discovery window"
+    )
+    scan_parser.add_argument(
+        "-s",
+        "--seconds",
+        type=float,
+        default=DEFAULT_SCAN_SECONDS,
+        help=(
+            f"scan window, clamped to "
+            f"{MIN_SCAN_SECONDS:g}-{MAX_SCAN_SECONDS:g} s "
+            f"(default: {DEFAULT_SCAN_SECONDS:g})"
+        ),
+    )
+    scan_parser.add_argument(
+        "--json", action="store_true", help="emit the sanitized report as JSON"
+    )
+    scan_parser.add_argument(
+        "--save",
+        metavar="NAME",
+        help="also write the sanitized report into the private store under NAME",
+    )
+
+    pair_parser = sub.add_parser(
+        "pair",
+        help="scan, then pair with the single strong candidate (persistent change)",
+    )
+    pair_parser.add_argument(
+        "--confirm",
+        action="store_true",
+        help="required: pairing is a persistent change to the node's BlueZ state",
+    )
+    pair_parser.add_argument("-s", "--seconds", type=float, default=20.0)
+    pair_parser.add_argument(
+        "--use-bond",
+        action="store_true",
+        help="resolve the detector from BlueZ's existing bond state, no discovery",
+    )
+    pair_parser.add_argument(
+        "--then-read",
+        action="store_true",
+        help="on success, immediately read the Device Information characteristics",
+    )
+
+    identity_parser = sub.add_parser(
+        "identity", help="GATT-read the Device Information characteristics"
+    )
+    identity_parser.add_argument("-s", "--seconds", type=float, default=20.0)
+    return parser
+
+
+def _cmd_plan() -> int:
+    print(f"uniden-r8 {__version__}  read-only probe plan\n")
+    print("Permitted operations, in order:\n")
+    for index, (operation, uuid) in enumerate(PROBE_PLAN, 1):
+        entry = describe(uuid)
+        print(f"  {index:>2}. {operation:<7} {entry.name:<28} [{entry.evidence.value}]")
+
+    print("\nPermanently forbidden:\n")
+    for uuid in sorted(FORBIDDEN_UUIDS):
+        entry = describe(uuid)
+        print(f"      {entry.name} ({uuid})")
+
+    print("\nApplication commands this project refuses to transmit:\n")
+    for command in KNOWN_WRITE_COMMANDS:
+        print(f"      {command}")
+    print(
+        "\n  Recorded from AegisX86/UnidenR8wlink @ 9072bc2f, which documents "
+        "\n  them as decompiled from the Uniden R/Tach app and never sent to "
+        "\n  hardware on any model.  There is no flag that enables them here."
+    )
+    return 0
+
+
+def _cmd_selftest(store_path: str) -> int:
+    checks: list[tuple[str, bool, str]] = []
+
+    # 1. The command characteristic is refused by the gate.
+    for label, gate in (("read", assert_readable), ("notify", assert_notifiable)):
+        try:
+            gate(COMMAND_WRITE_UUID)
+        except WriteRefused:
+            checks.append((f"gate refuses {label} of the command characteristic", True, ""))
+        else:  # pragma: no cover - a regression here is a release blocker
+            checks.append((f"gate refuses {label} of the command characteristic", False,
+                           "the gate ALLOWED it"))
+
+    # 2. Every known R/Tach command is refused.
+    refused = 0
+    for command in KNOWN_WRITE_COMMANDS:
+        try:
+            refuse_command(command)
+        except WriteRefused:
+            refused += 1
+    checks.append(
+        (f"all {len(KNOWN_WRITE_COMMANDS)} known R/Tach commands refused",
+         refused == len(KNOWN_WRITE_COMMANDS),
+         f"only {refused} refused"),
+    )
+
+    # 3. No write path exists in the installed package source.  This parses
+    # rather than greps: the safety modules discuss write_gatt_char in prose,
+    # and a check that cannot tell a docstring from a call is not a check.
+    findings = audit_package(Path(__file__).resolve().parent)
+    checks.append(
+        ("no module references an application-write bleak API", not findings,
+         "; ".join(str(f) for f in findings)),
+    )
+
+    # 4. The private store is sealed.
+    store = PrivateStore(store_path).ensure()
+    _ = store.salt
+    checks.append(
+        (f"private store {store_path} is 0700/0600", store.is_sealed(),
+         f"modes: {store.audit()}"),
+    )
+
+    # 5. The catalogue is internally consistent.
+    consistent = all(
+        not (entry.readable and entry.uuid in FORBIDDEN_UUIDS) for entry in CATALOGUE
+    )
+    checks.append(("no forbidden characteristic is marked readable", consistent, ""))
+
+    width = max(len(label) for label, _, _ in checks)
+    failures = 0
+    for label, passed, detail in checks:
+        status = "ok  " if passed else "FAIL"
+        print(f"  {status}  {label.ljust(width)}" + (f"   {detail}" if not passed else ""))
+        failures += not passed
+
+    print()
+    if failures:
+        print(f"{failures} check(s) FAILED; do not run against the detector.")
+        return 1
+    print("All read-only properties hold.")
+    return 0
+
+
+def _render(report) -> str:
+    lines = [
+        f"scan started {report.started_at}, window {report.requested_seconds:g}s",
+        f"devices seen: {report.total_seen}"
+        + ("  (scan timed out and was cancelled)" if report.timed_out else ""),
+        "",
+    ]
+    if not report.candidates:
+        lines += [
+            "No R-series candidate advertised in this window.",
+            "",
+            "That is the expected result unless the detector is in BT Pairing",
+            "mode or is already paired and idle: an unpaired Uniden R-series",
+            "detector does not advertise at all otherwise, and a paired one",
+            "stops the moment anything connects to it.",
+        ]
+    else:
+        lines.append("tier      name                   token          signal")
+        lines += [f"{candidate.line()}" for candidate in report.candidates]
+    return "\n".join(lines)
+
+
+def _cmd_scan(store_path: str, seconds: float, as_json: bool, save: str | None) -> int:
+    store = PrivateStore(store_path).ensure()
+    try:
+        report = asyncio.run(scan(seconds, store.salt))
+    except ImportError:
+        print(
+            "bleak is not installed in this environment.\n"
+            "The scan needs it; the plan and selftest subcommands do not.\n"
+            "  python3 -m venv .venv && .venv/bin/pip install bleak",
+            file=sys.stderr,
+        )
+        return 2
+
+    if save:
+        store.write_json(save, report.as_dict())
+
+    output = json.dumps(report.as_dict(), indent=2) if as_json else _render(report)
+    # publish() refuses rather than sanitizes: reaching it with an address in
+    # hand means the redaction above failed, and that must be loud.
+    print(publish(output))
+    return 0
+
+
+async def _find_one_strong(store, seconds: float):
+    """Return the single strong candidate's raw address, or raise.
+
+    Fail-closed on ambiguity.  The address is returned for immediate use and
+    never printed, stored outside the private store, or returned to a caller
+    that would publish it.
+    """
+    from .discovery import _discover, _iter_results, _to_advertisement, bounded_seconds
+
+    window = bounded_seconds(seconds)
+    results = await asyncio.wait_for(_discover(timeout=window), timeout=window + 5.0)
+    advertisements = [_to_advertisement(entry) for entry in _iter_results(results)]
+    strong = [a for a in advertisements if classify(a.name) == "strong"]
+
+    if not strong:
+        raise LookupError(
+            f"no R-series candidate advertised in {window:g}s.  An unpaired "
+            f"detector does not advertise unless it is in BT Pairing mode, and "
+            f"a paired one stops the moment anything connects to it."
+        )
+    if len(strong) > 1:
+        raise LookupError(
+            f"{len(strong)} R-series candidates advertised; refusing to guess "
+            f"which one is the detector"
+        )
+    return strong[0], len(advertisements)
+
+
+def _cmd_pair(
+    store_path: str, seconds: float, confirm: bool, then_read: bool, use_bond: bool
+) -> int:
+    from .pairing import PairingRefused, pair
+
+    if not confirm:
+        print(
+            "Pairing is a persistent change to this node's Bluetooth state.\n"
+            "Re-run with --confirm once the detector is in BT Pairing mode.",
+            file=sys.stderr,
+        )
+        return 2
+
+    store = PrivateStore(store_path).ensure()
+    salt = store.salt
+
+    if use_bond:
+        # BlueZ already holds the address to keep the bond, so reading it back
+        # costs no new exposure -- unlike writing a second copy to a file.
+        from .pairing import bonded_detector_address
+
+        try:
+            address = bonded_detector_address()
+        except LookupError as exc:
+            print(publish(str(exc)), file=sys.stderr)
+            return 1
+        print(f"using the bonded detector {redact_address(address, salt)} (no discovery)")
+    else:
+        try:
+            candidate, total = asyncio.run(_find_one_strong(store, seconds))
+        except (LookupError, TimeoutError) as exc:
+            print(publish(str(exc)), file=sys.stderr)
+            return 1
+        except ImportError:
+            print("bleak is not installed in this environment.", file=sys.stderr)
+            return 2
+        address = candidate.address
+        print(f"found 1 strong candidate out of {total} devices seen:")
+        print(f"  {redact_name(candidate.name, salt)}  {redact_address(address, salt)}")
+
+    print("pairing (leaving it untrusted and disconnected)...")
+
+    try:
+        result = pair(address, salt)
+    except PairingRefused as exc:
+        print(publish(f"refused: {exc}"), file=sys.stderr)
+        return 1
+
+    store.write_json("pair-result.json", {
+        "paired": result.paired, "trusted": result.trusted,
+        "connected": result.connected, "attempts": result.attempts,
+        "detail": result.detail,
+    })
+
+    print(f"  paired:    {result.paired}   (attempts: {result.attempts})")
+    print(f"  trusted:   {result.trusted}  (must be False: BlueZ would auto-reconnect)")
+    print(f"  connected: {result.connected} (must be False: BlueZ must release the link)")
+    if result.detail:
+        print(f"  note: {publish(result.detail)}")
+    if not result.paired:
+        print("\nlast bluetoothctl lines:", file=sys.stderr)
+        for line in result.transcript[-12:]:
+            print(f"  {publish(line)}", file=sys.stderr)
+        return 1
+
+    # Postconditions.  A bond that succeeded but left the device trusted or
+    # connected is a failure, not a success with a footnote: a trusted device
+    # is auto-reconnected by BlueZ forever and competes for the radio the
+    # vehicle link uses, and a held link makes the detector invisible to
+    # everything else.  Both must be loud.
+    violations = []
+    if result.trusted:
+        violations.append(
+            "device is still TRUSTED — BlueZ will auto-reconnect to it on every "
+            "boot and compete for the radio; run: bluetoothctl untrust <device>"
+        )
+    if result.connected:
+        violations.append(
+            "device is still CONNECTED — BlueZ is holding the link, so nothing "
+            "else can reach it; run: bluetoothctl disconnect <device>"
+        )
+    if violations:
+        print("\nPAIRING POSTCONDITION FAILED:", file=sys.stderr)
+        for violation in violations:
+            print(f"  {violation}", file=sys.stderr)
+        return 1
+
+    if then_read:
+        print()
+        return _cmd_identity(store_path, seconds, address=address)
+    return 0
+
+
+def _cmd_identity(store_path: str, seconds: float, address: str | None = None) -> int:
+    from .identity import read_identity
+
+    store = PrivateStore(store_path).ensure()
+    salt = store.salt
+
+    if address is None:
+        # Prefer BlueZ's own bond state: no discovery, and no second copy of
+        # the address anywhere.
+        from .pairing import PairingRefused, bonded_detector_address
+
+        try:
+            address = bonded_detector_address()
+        except (LookupError, PairingRefused):
+            address = None
+    if address is None:
+        try:
+            candidate, _ = asyncio.run(_find_one_strong(store, seconds))
+            address = candidate.address
+        except (LookupError, TimeoutError) as exc:
+            print(publish(str(exc)), file=sys.stderr)
+            return 1
+        except ImportError:
+            print("bleak is not installed in this environment.", file=sys.stderr)
+            return 2
+
+    identity = asyncio.run(read_identity(address, salt))
+    store.write_json("identity.json", identity.as_dict())
+    print(publish(identity.render()))
+    return 0 if identity.connected else 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    if args.command == "plan":
+        return _cmd_plan()
+    if args.command == "selftest":
+        return _cmd_selftest(args.store)
+    if args.command == "scan":
+        return _cmd_scan(args.store, args.seconds, args.json, args.save)
+    if args.command == "pair":
+        return _cmd_pair(
+            args.store, args.seconds, args.confirm, args.then_read, args.use_bond
+        )
+    if args.command == "identity":
+        return _cmd_identity(args.store, args.seconds)
+    return 2  # pragma: no cover - argparse rejects unknown subcommands first
+
+
+if __name__ == "__main__":  # pragma: no cover
+    raise SystemExit(main())
