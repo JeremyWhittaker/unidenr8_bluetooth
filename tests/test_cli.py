@@ -143,7 +143,29 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     assert actions, "expected a subcommand action"
     assert set(actions[0].choices) == {
         "plan", "selftest", "scan", "pair", "identity", "live", "collect",
+        "inspect", "history", "config",
     }
+
+
+def test_inspect_refuses_without_explicit_confirmation(capsys):
+    """It reads the POI database; that is a decision, not a default.
+
+    Checked at the command rather than only in `inspection.inspect()`, because
+    the point is that nothing reaches the radio: a refusal that happened after
+    connecting would already have opened the link.
+    """
+    assert cli.main(["inspect"]) == 2
+    message = capsys.readouterr().err
+    assert "--confirm" in message
+    assert "POI" in message
+
+
+def test_the_offline_commands_need_no_radio_and_no_detector(capsys, tmp_path):
+    """`history` and `config` must work on a machine with no Bluetooth."""
+    assert cli.main(["--config", str(tmp_path / "absent.toml"), "config"]) == 2
+    assert cli.main(["config", "--example"]) == 0
+    assert "[collector]" in capsys.readouterr().out
+    assert cli.main(["history"]) == 1  # no database yet, reported not raised
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])

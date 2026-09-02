@@ -31,11 +31,12 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
-from .privacy import load_or_create_salt, looks_like_identifier
+from .privacy import load_or_create_salt, looks_like_identifier, looks_like_position
 
 __all__ = [
     "DIR_MODE",
@@ -44,6 +45,8 @@ __all__ = [
     "PublicationRefused",
     "publish",
     "utc_stamp",
+    "utc_stamp_ms",
+    "iso_from_wall_ns",
 ]
 
 #: Owner-only.  A group-readable evidence directory on a shared machine is
@@ -59,6 +62,30 @@ class PublicationRefused(RuntimeError):
 def utc_stamp() -> str:
     """Return an ISO-8601 UTC timestamp, second resolution."""
     return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def utc_stamp_ms() -> str:
+    """Return an ISO-8601 UTC timestamp with milliseconds.
+
+    Second resolution was enough while the only timestamps were "when did this
+    scan run".  It is not enough for alert transitions: a threat that appears
+    and is muted inside the same second produces two events that cannot be
+    ordered by their stamps, and ordering is the whole point of an event log.
+    Sequence numbers carry the real ordering; this makes the stamps agree with
+    them instead of quietly contradicting them.
+    """
+    return iso_from_wall_ns(time.time_ns())
+
+
+def iso_from_wall_ns(wall_ns: int) -> str:
+    """Format a nanosecond wall-clock reading as millisecond ISO-8601 UTC.
+
+    Takes the reading rather than calling the clock so that a record stamped in
+    a BLE callback and the text written for it hours later describe the same
+    instant.  See :mod:`uniden_r8.events` for why the two clocks are separate.
+    """
+    moment = datetime.fromtimestamp(wall_ns / 1e9, UTC)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
 
 
 class PrivateStore:
@@ -156,6 +183,14 @@ def publish(text: str) -> str:
     The last gate before anything leaves the private side.  It does not
     sanitize -- sanitizing here would hide the bug that produced an
     unsanitized string in the first place -- it refuses.
+
+    Two questions are asked, not one.  The original was "does this still
+    contain an address".  The second, "does this contain somewhere the vehicle
+    has been", was added when an external GNSS source made a latitude possible
+    for the first time: a gate that refused a MAC address while printing a
+    coordinate would be defending the wrong thing.  Structured documents are
+    decoded and walked by key so that ``{"lat": 33.4}`` is caught and
+    ``{"voltage": 33.4}`` is not.
     """
     if looks_like_identifier(text):
         raise PublicationRefused(
@@ -163,4 +198,27 @@ def publish(text: str) -> str:
             "address.  Tokenise it with uniden_r8.privacy first; see "
             "docs/SAFETY.md."
         )
+    if looks_like_position(_decoded(text)):
+        raise PublicationRefused(
+            "refusing to publish: the text contains a position.  Coordinates "
+            "and the detector's own heading, speed and altitude belong in the "
+            "owner-only state directory or the private store, never in "
+            "printed or committed output; see docs/SAFETY.md."
+        )
     return text
+
+
+def _decoded(text: str) -> object:
+    """Return *text* parsed as JSON if it is JSON, else the text itself.
+
+    The position check is about meaning, and meaning lives in the keys.  A JSON
+    document checked as a flat string would either miss ``"lat": 33.4`` or
+    have to guess at every bare number in it.
+    """
+    stripped = text.lstrip()
+    if stripped[:1] not in {"{", "["}:
+        return text
+    try:
+        return json.loads(text)
+    except (ValueError, TypeError):
+        return text

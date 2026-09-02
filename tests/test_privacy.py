@@ -13,6 +13,7 @@ from fixtures import (
     RANDOM_STATIC,
     RANDOM_STATIC_ALT,
     bt_address,
+    ipv4,
 )
 from uniden_r8 import privacy
 
@@ -139,3 +140,56 @@ def test_a_truncated_salt_file_is_replaced_not_used(tmp_path):
     path.write_bytes(b"\x44" * 4)
     salt = privacy.load_or_create_salt(path)
     assert len(salt) == privacy.SALT_BYTES
+
+
+# --------------------------------------------------- loopback and position
+
+def test_loopback_is_not_an_identifier():
+    """Every machine has one; it names nobody.
+
+    The exemption lives in privacy.py rather than as an exception list in the
+    hygiene test, so that a reviewer reading the redaction rules sees it.
+    """
+    for address in ("127.0.0.1", "127.0.0.53", "0.0.0.0", "255.255.255.255"):
+        assert privacy.is_non_identifying_host(address)
+        assert not privacy.looks_like_identifier(address)
+
+
+def test_a_routable_address_is_still_an_identifier():
+    """The exemption must stay narrow, including for private ranges."""
+    routable = ipv4(198, 51, 100, 20)
+    assert not privacy.is_non_identifying_host(routable)
+    assert privacy.looks_like_identifier(routable)
+    assert privacy.looks_like_identifier(ipv4(192, 168, 1, 10))
+    assert privacy.looks_like_identifier(ipv4(10, 0, 0, 4))
+
+
+def test_scrub_leaves_loopback_alone_and_still_redacts_a_real_host():
+    text = f"connected to 127.0.0.1 via {ipv4(203, 0, 113, 9)}"
+    scrubbed = privacy.scrub(text, SALT)
+    assert "127.0.0.1" in scrubbed
+    assert ipv4(203, 0, 113, 9) not in scrubbed
+    assert "<host-redacted>" in scrubbed
+
+
+def test_a_coordinate_is_recognised_by_the_key_that_names_it():
+    """A bare number is ambiguous; a number under `lat` is not."""
+    assert privacy.looks_like_position({"lat": 33.4484, "lon": -112.0740})
+    assert privacy.looks_like_position({"a": [{"b": {"latitude": 1.5}}]})
+    assert privacy.looks_like_position("fix at 33.4484,-112.0740")
+
+
+def test_ordinary_telemetry_is_not_mistaken_for_a_coordinate():
+    """A false positive here would refuse to publish a normal state document."""
+    assert not privacy.looks_like_position({"voltage": 33.4484})
+    assert not privacy.looks_like_position({"speed_mph": 45, "altitude_ft": 312})
+    assert not privacy.looks_like_position({"lat": None, "lon": None})
+    assert not privacy.looks_like_position("13.6, 12.1")
+    assert not privacy.looks_like_position({"frequency_ghz": 33.785})
+
+
+def test_a_cycle_is_refused_rather_than_recursed_into():
+    """Deliberately cautious: refusing to publish costs five minutes."""
+    loop: dict = {}
+    loop["self"] = loop
+    assert privacy.looks_like_position(loop)

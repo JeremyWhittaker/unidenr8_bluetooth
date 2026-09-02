@@ -547,3 +547,243 @@ def test_invalid_direct_durations_are_refused_before_any_link_opens(tmp_path, du
     with pytest.raises(ValueError, match="finite and greater than zero"):
         _run(tmp_path, lambda: HEALTHY, lambda _address: FakeClient(), duration=duration)
     assert FakeClient.instances == []
+
+
+# ------------------------------------------------- the two published documents
+
+#: The exact shape the e-paper display was written against.  Pinned as a
+#: literal rather than against the module constant: asserting
+#: `doc["schema"] == collector.SCHEMA_VERSION` is a tautology that stays green
+#: while the consumer breaks.
+SCHEMA_ONE_KEYS = {
+    "schema", "updated_at", "collector", "obd", "link", "counters",
+    "telemetry", "alerts", "display_line",
+}
+
+
+def _detail(tmp_path):
+    return json.loads((tmp_path / "state" / "state-v2.json").read_text())
+
+
+def test_state_json_is_still_schema_one_with_exactly_its_original_keys(tmp_path):
+    """A consumer requiring `schema == 1` exists and must keep working."""
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient())
+    document = _doc(tmp_path)
+    assert document["schema"] == 1
+    assert set(document) == SCHEMA_ONE_KEYS
+    assert set(document["collector"]) == {
+        "mode", "status", "started_at", "reconnects", "note"
+    }
+    assert set(document["link"]) == {"connected", "compatible"}
+    assert set(document["counters"]) == {
+        "telemetry_packets", "alert_packets", "unparsed_telemetry"
+    }
+
+
+def test_the_detailed_document_is_schema_two_and_a_separate_file(tmp_path):
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient())
+    assert _detail(tmp_path)["schema"] == 2
+    assert _doc(tmp_path)["schema"] == 1
+
+
+def test_the_detailed_document_is_owner_only_and_git_ignored(tmp_path):
+    """It carries the detector's heading, speed and altitude.
+
+    Those are position-adjacent -- a log of them is a rough trace of a drive --
+    so the permissions and the ignore rule are the controls that make decoding
+    them acceptable at all.
+    """
+    import subprocess
+    from pathlib import Path
+
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient())
+    detail = tmp_path / "state" / "state-v2.json"
+    assert detail.stat().st_mode & 0o777 == FILE_MODE
+    assert detail.parent.stat().st_mode & 0o777 == DIR_MODE
+
+    repo = Path(__file__).resolve().parent.parent
+    for candidate in (".state/state-v2.json", ".state/history.db"):
+        assert subprocess.run(
+            ["git", "-C", str(repo), "check-ignore", "-q", candidate], check=False
+        ).returncode == 0, f"{candidate} is NOT git-ignored"
+
+
+def test_only_the_detailed_document_carries_the_detectors_own_motion(tmp_path):
+    """The split is the whole design: schema 1 stays free of position."""
+    client = FakeClient(emit=[(gatt.TELEMETRY_UUID, b"13.6&0&NE,45,312,C&0&12&D&D")])
+    _run(tmp_path, lambda: HEALTHY, lambda a: client)
+
+    plain = _doc(tmp_path)
+    assert "detector" not in plain
+    for banned in ("heading", "altitude", "speed", "direction_8"):
+        assert banned not in json.dumps(plain)
+
+    gps = _detail(tmp_path)["detector"]["detector_gps"]
+    assert gps["direction_8"] == "NE"
+    assert gps["speed_raw"] == 45
+    assert gps["altitude_raw"] == 312
+
+
+def test_neither_document_carries_an_identifier(tmp_path):
+    client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY),
+                              (gatt.ALERT_UUID, ALERT)])
+    _run(tmp_path, lambda: HEALTHY, lambda a: client)
+    for name in ("state.json", "state-v2.json"):
+        body = (tmp_path / "state" / name).read_text()
+        assert not looks_like_identifier(body), name
+        assert RANDOM_STATIC not in body
+
+
+def test_the_detailed_document_carries_no_position_without_a_gnss_source(tmp_path):
+    """The detector supplies none, and no fix was configured."""
+    from uniden_r8.privacy import looks_like_position
+
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient())
+    detail = _detail(tmp_path)
+    assert detail["vehicle_gnss"] is None
+    assert not looks_like_position(detail)
+
+
+# ----------------------------------------------------------- lossless events
+
+def test_a_short_alert_produces_a_start_and_an_end(tmp_path):
+    """The bug this rewrite exists to fix.
+
+    An alert that begins and clears inside one publish interval used to reach
+    nobody: the callback replaced a value and the timer published later.  Both
+    transitions must survive.
+    """
+    client = FakeClient(emit=[(gatt.ALERT_UUID, ALERT),
+                              (gatt.ALERT_UUID, b"0&0&0&0"),
+                              (gatt.ALERT_UUID, b"0&0&0&0")])
+    _run(tmp_path, lambda: HEALTHY, lambda a: client)
+    kinds = [event["kind"] for event in _detail(tmp_path)["recent_events"]]
+    assert "alert_start" in kinds
+    assert "alert_end" in kinds
+
+
+def test_a_dropped_notification_is_visible_as_a_gap(tmp_path):
+    """A silent drop is a lie.  Overflow must be reportable, not inferred."""
+    from uniden_r8 import events
+
+    ingest = events.Ingest(maxsize=4)
+    for index in range(12):
+        ingest.offer("alert", f"{index}".encode())
+
+    records = ingest.drain()
+    gaps = [r for r in records if isinstance(r, events.Gap)]
+    assert gaps, "an overflow must leave a gap record in the stream"
+    assert ingest.metrics.dropped > 0
+    assert gaps[0].count == ingest.metrics.dropped
+    # And the newest arrival is always available regardless of the backlog.
+    assert ingest.latest["alert"].payload == b"11"
+
+
+def test_the_queue_metrics_reach_the_detailed_document(tmp_path):
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient())
+    ingest = _detail(tmp_path)["ingest"]
+    assert set(ingest) >= {"accepted", "dropped", "gaps", "high_water",
+                           "lost_notifications"}
+
+
+def test_the_loop_lag_watchdog_reports_a_number(tmp_path):
+    """The cheapest diagnostic here: everything that could starve the BLE
+    notification path shows up as overshoot on a quarter-second timer."""
+    _run(tmp_path, lambda: HEALTHY, lambda a: FakeClient(), duration=0.6)
+    health = _detail(tmp_path)["health"]
+    assert isinstance(health["loop_lag_ms"], (int, float))
+    assert health["loop_lag_alarm"] is False
+
+
+def test_the_obd_probe_never_runs_on_the_event_loop(tmp_path):
+    """It shells out twice with a five-second timeout each.
+
+    On the loop that would be a ten-second stall in the notification path,
+    which is long enough for BlueZ to drop the subscription -- so the probe is
+    dispatched to a thread and this pins that it stays there.
+    """
+    import threading
+
+    seen: list[int] = []
+    main = threading.get_ident()
+
+    def probe():
+        seen.append(threading.get_ident())
+        return HEALTHY
+
+    _run(tmp_path, probe, lambda a: FakeClient())
+    assert seen, "the probe must actually run"
+    assert all(ident != main for ident in seen), "the probe ran on the event loop"
+
+
+def test_the_collector_issues_only_query_argv(tmp_path):
+    """The stronger form of the mutation check: real argv, not any list.
+
+    The scan above walks every list-of-strings in the module, which is broad
+    and cheap and also fooled by anything that is not a command vector -- a
+    ``__all__`` entry, a set of field names.  This one runs the probe against a
+    recording ``subprocess.run`` and checks what was actually going to be
+    executed, which is the thing that matters.
+    """
+    import subprocess
+
+    seen: list[list[str]] = []
+
+    class Completed:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def recording_run(args, **_kwargs):
+        seen.append(list(args))
+        result = Completed()
+        result.stdout = "inactive"
+        return result
+
+    original = subprocess.run
+    subprocess.run = recording_run
+    try:
+        collector.make_obd_probe("some-unit", "/dev/null")()
+    finally:
+        subprocess.run = original
+
+    assert seen, "the probe must actually run a command"
+    mutating = {"start", "stop", "restart", "reload", "enable", "disable",
+                "mask", "bind", "release", "unbind", "connect", "trust",
+                "pair", "power"}
+    for argv in seen:
+        assert not (set(argv) & mutating), f"mutating argv: {argv}"
+        assert argv[0] in {"systemctl", "rfcomm"}, f"unexpected binary: {argv[0]}"
+        if argv[0] == "systemctl":
+            assert argv[1] == "is-active", "systemctl may only be queried"
+        else:
+            assert len(argv) == 1, "rfcomm takes no arguments here"
+
+
+def test_the_argv_check_would_catch_a_mutation():
+    """A control that cannot fail proves nothing."""
+    mutating = {"start", "stop", "restart", "enable", "bind", "release"}
+    hypothetical_argv = ["systemctl", "restart", "hummer-rfcomm"]
+    assert set(hypothetical_argv) & mutating
+
+
+def test_the_collector_runs_with_the_obd_guard_disabled(tmp_path):
+    """A node with no OBDLink must still be able to run this.
+
+    The first version of the collector hard-coded a unit name and a device that
+    exist only on one Pi, which made the whole project unusable anywhere else.
+    """
+    from uniden_r8 import config as config_module
+
+    settings = config_module.Config(obd=config_module.ObdConfig(guard=False))
+    asyncio.run(
+        collector.run(
+            RANDOM_STATIC, tmp_path / "state", duration=0.15,
+            client_factory=lambda a: FakeClient(),
+            install_signal_handlers=False, config=settings,
+        )
+    )
+    document = _doc(tmp_path)
+    assert document["obd"]["healthy"] is True
+    assert _detail(tmp_path)["obd"]["guard_enabled"] is False
+    assert "guard disabled" in document["obd"]["reason"]

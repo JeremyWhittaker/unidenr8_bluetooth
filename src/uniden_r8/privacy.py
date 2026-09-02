@@ -23,6 +23,25 @@ SHA-256 token that is:
 :func:`token` deliberately; ``scrub`` exists so that free text which was never
 supposed to contain an address -- an exception message from BlueZ, a
 subprocess transcript -- cannot leak one by accident.
+
+Two additions, both learned the hard way
+----------------------------------------
+**Loopback is not an identifier.**  ``127.0.0.1`` matches the IPv4 pattern and
+identifies nothing: every machine has one, and a configuration file that cannot
+write it is a configuration file whose documentation has to talk around its own
+defaults.  :func:`is_non_identifying_host` names the exact exemption --
+loopback, the unspecified address, and the broadcast address -- and
+:func:`looks_like_identifier` honours it.  The exemption lives here, in the
+module a reviewer reads to understand the rule, and not as an exception list
+inside the hygiene test, where it would be invisible.
+
+**A coordinate is an identifier too.**  The original gate only knew about
+Bluetooth and host addresses, because at the time nothing here could produce a
+latitude.  That changed the moment an external GNSS source arrived, and a gate
+that would happily publish 33.4484, -112.0740 while refusing a MAC address is
+not protecting the thing that actually matters.  :func:`looks_like_position`
+answers "does this document contain somewhere a vehicle has been", and
+``evidence.publish()`` calls it alongside the address check.
 """
 
 from __future__ import annotations
@@ -39,12 +58,15 @@ __all__ = [
     "TOKEN_HEX_LEN",
     "MAC_RE",
     "IPV4_RE",
+    "COORDINATE_KEYS",
     "load_or_create_salt",
     "token",
     "redact_address",
     "redact_name",
     "scrub",
     "looks_like_identifier",
+    "looks_like_position",
+    "is_non_identifying_host",
 ]
 
 #: 256 bits.  A Bluetooth address is 48 bits, which is trivially enumerable
@@ -72,6 +94,37 @@ IPV4_RE: Final[re.Pattern[str]] = re.compile(
 #: The R8w appends an address fragment to its advertised name, so the name is
 #: itself partly an identifier.  The model prefix is the part worth keeping.
 _NAME_SPLIT_RE: Final[re.Pattern[str]] = re.compile(r"^([A-Za-z0-9]{1,12})([@\-_].*)$")
+
+#: Addresses that name no host.  ``127.0.0.0/8`` is loopback on every machine,
+#: ``0.0.0.0`` is "unspecified", and ``255.255.255.255`` is broadcast; none of
+#: them can be traced to anyone, and all three appear in ordinary configuration
+#: and documentation.  This is the complete exemption -- a routable address is
+#: still an identifier, including a private one, because ``192.168.x.y`` plus a
+#: little context identifies a network just fine.
+_LOOPBACK_PREFIX: Final[str] = "127."
+_UNSPECIFIED_HOSTS: Final[frozenset[str]] = frozenset(
+    {"0.0.0.0", "255.255.255.255"}  # noqa: S104 - named to be exempted, not bound
+)
+
+#: JSON keys whose numeric value is a position.  Checked by name as well as by
+#: value because a bare number is ambiguous -- ``33.44`` could be a voltage --
+#: while ``"lat": 33.44`` is not ambiguous at all.
+COORDINATE_KEYS: Final[frozenset[str]] = frozenset(
+    {
+        "lat", "latitude", "lon", "long", "lng", "longitude",
+        "coord", "coords", "coordinate", "coordinates",
+        "position", "gps_lat", "gps_lon",
+    }
+)
+
+#: A decimal-degrees pair in text: two signed decimals with at least three
+#: fraction digits, separated by a comma.  Three digits is the threshold at
+#: which a pair stops looking like two ordinary measurements and starts looking
+#: like a fix -- 33.4484,-112.0740 is roughly eleven metres of precision.
+_DECIMAL_PAIR_RE: Final[re.Pattern[str]] = re.compile(
+    r"[-+]?(?:90(?:\.0+)?|[0-8]?\d\.\d{3,})\s*,\s*"
+    r"[-+]?(?:180(?:\.0+)?|1[0-7]\d\.\d{3,}|\d?\d\.\d{3,})"
+)
 
 
 def load_or_create_salt(path: str | os.PathLike[str]) -> bytes:
@@ -164,7 +217,27 @@ def scrub(text: str, salt: bytes) -> str:
     if not isinstance(text, str):
         raise TypeError(f"scrub() takes a string, got {type(text)!r}")
     text = MAC_RE.sub(lambda m: token(m.group(0), salt, prefix="ble"), text)
-    return IPV4_RE.sub("<host-redacted>", text)
+    return IPV4_RE.sub(
+        lambda m: m.group(0) if is_non_identifying_host(m.group(0))
+        else "<host-redacted>",
+        text,
+    )
+
+
+def is_non_identifying_host(address: str) -> bool:
+    """Return ``True`` for an address that names no particular machine.
+
+    Loopback, unspecified, and broadcast.  Nothing else: an address in a
+    private range still identifies a host on a network, and exempting one would
+    quietly widen the hole this function exists to keep narrow.
+
+    (This docstring cannot give the counter-example as a literal.  The
+    repository hygiene test scans every committable file for exactly that
+    pattern, and it is right to -- the check has no exception list, which is
+    what makes it a control rather than a convention.)
+    """
+    candidate = address.strip()
+    return candidate.startswith(_LOOPBACK_PREFIX) or candidate in _UNSPECIFIED_HOSTS
 
 
 def looks_like_identifier(text: str) -> bool:
@@ -173,5 +246,49 @@ def looks_like_identifier(text: str) -> bool:
     Used by the tests, and by :mod:`uniden_r8.evidence` before anything is
     written outside the private directory.  It answers "would publishing this
     leak an address", which is the only question that matters at that boundary.
+
+    Loopback and unspecified addresses do not count; see
+    :func:`is_non_identifying_host` for the exact exemption and why it is here
+    rather than in the caller.
     """
-    return bool(MAC_RE.search(text) or IPV4_RE.search(text))
+    if MAC_RE.search(text):
+        return True
+    return any(
+        not is_non_identifying_host(match.group(0))
+        for match in IPV4_RE.finditer(text)
+    )
+
+
+def looks_like_position(value: object, *, _depth: int = 0) -> bool:  # noqa: PLR0911
+    """Return ``True`` if *value* contains somewhere the vehicle has been.
+
+    Walks a decoded JSON structure rather than its serialised text, because the
+    question is about *meaning*: a number is only a coordinate when something
+    calls it one.  A key named ``lat`` holding a number is a position; the same
+    number under ``voltage`` is not.  Free text is checked separately for a
+    decimal-degrees pair, which is how a coordinate usually escapes into prose.
+
+    This is the gate that stands between the GNSS branch of the schema and
+    anything published outside the owner-only directories.  It is deliberately
+    willing to be wrong in the cautious direction: refusing to publish a
+    document that merely looks positional costs a developer five minutes, and
+    the opposite mistake is permanent.
+    """
+    if _depth > 12:  # a cycle or an absurd nesting; refuse rather than recurse
+        return True
+    if isinstance(value, str):
+        return bool(_DECIMAL_PAIR_RE.search(value))
+    if isinstance(value, dict):
+        for key, item in value.items():
+            name = str(key).strip().lower()
+            if name in COORDINATE_KEYS and isinstance(item, (int, float)) \
+                    and not isinstance(item, bool):
+                return True
+            if name in COORDINATE_KEYS and isinstance(item, (list, tuple)) and item:
+                return True
+            if looks_like_position(item, _depth=_depth + 1):
+                return True
+        return False
+    if isinstance(value, (list, tuple)):
+        return any(looks_like_position(item, _depth=_depth + 1) for item in value)
+    return False

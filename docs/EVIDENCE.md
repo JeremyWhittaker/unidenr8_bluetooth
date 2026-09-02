@@ -349,12 +349,12 @@ because this project does not read those characteristics.
 
 ### Not published
 
-The raw payloads are in the node's owner-only private store. Heading, speed,
-altitude and the details of any POI warning are parsed nowhere and published
-nowhere — they describe where Jeremy is and where he has been, and none of them
-is needed to answer what the detector is currently reporting. Published output
-carries voltage, GPS-fix state, a POI-warning boolean, and the alert fields a
-radar detector exists to report.
+The raw payloads are in the node's owner-only private store.
+
+*(As recorded at the time, heading, speed, altitude and POI detail were parsed
+nowhere. That changed in §9: they are decoded now, and confined by permissions
+and opt-ins rather than by absence. The observation above is unaffected — none
+of those fields was published then and none is published by default now.)*
 
 ---
 
@@ -427,3 +427,73 @@ zero reconnects, exited 0 after bounded disconnect cleanup, left the detector
 disconnected, and again left `hummer-rfcomm` active with `rfcomm0` bound and
 zero failed units. This was a code-path check, not additional OBD-throughput
 evidence.
+
+---
+
+## 9. The expansion build — what changed, and what it did not prove
+
+Dated 2026-09-02. This entry exists because the project grew a great deal in one
+pass, and growth is easy to mistake for evidence.
+
+### What was added
+
+An event path (`events.py`) that turns full-snapshot alert notifications into
+`alert_start` / `alert_update` / `alert_end` transitions; a decoder that exposes
+every field of both packet formats with a per-field confidence grade; a second
+published document at schema 2; a local SQLite history; a `gpsd` client; an
+optional MQTT publisher; a standard-library HTTP and server-sent-events feed; a
+confirmed read-only settings and POI inspection command; and a TOML
+configuration that makes the OBD guard, the node's unit and device names, and
+every outward feed into settings rather than constants.
+
+### The grade of all of it
+
+**None of it has met the detector.** Every one of those components is tested
+against injected fakes: 617 tests, no radio, no broker, no `gpsd`, no network.
+That is evidence that the code does what it was written to do. It is not
+evidence about the protocol, the hardware, or the vehicle.
+
+| Claim | Grade |
+|---|---|
+| The event path never loses a short alert | code-level, proven against a synthetic 400 ms alert |
+| The alert tracker follows one source across a front→side→rear pass | code-level, proven against synthetic snapshots |
+| Alert field meanings (band, strength, frequency, direction, mute) | still **UPSTREAM (R8w)**. Unchanged by this build. |
+| Detector heading / speed / altitude *units* | still **UPSTREAM**. Decoded now, never measured. |
+| Laser gun identifiers 0-19 | still **UPSTREAM-UNVERIFIED**. No laser packet has ever been captured on any hardware. |
+| Mute codes 3-6 | still **UPSTREAM-UNVERIFIED**. |
+| POI record layout | still **INFERENCE**, and deliberately has no parser. |
+| Settings block layout | still unknown. `inspect` snapshots it; nothing decodes it. |
+| OBD coexistence under active polling | still **not established**. §8's two limits stand. |
+
+### Three defects this build found in its own new code
+
+Recorded because "the tests passed" is a weaker statement than "the tests caught
+these", and because each of the three would have been invisible in production.
+
+1. **A new alert track was charged a miss on its own first snapshot.** The
+   claimed-track set was computed before any track was started, so a track
+   created by a snapshot counted as absent from it. That halved the miss
+   tolerance and made a single dropped packet split one threat into two.
+2. **The retention sweep could have deleted the whole history.** It cut on
+   `time.time_ns() - retain_days`, on a board with no battery-backed clock whose
+   wall clock steps by hours when the network appears. A clock briefly reading a
+   future date would have deleted everything, permanently, without an error. The
+   cut is now `min(now, newest row we hold)`.
+3. **The SQLite `-wal` sidecar took the process umask.** SQLite creates it
+   lazily at the first write, long after the umask was closed around
+   `connect()`. It holds the most recently written rows — the alert events, and
+   the coordinates when those are enabled — so a `0600` database with a
+   group-readable journal beside it was not a private history.
+
+Two more were found in the same pass and are worth the same note: a `gpsd`
+receiver that had gone quiet held shutdown open indefinitely, because the read
+was awaited rather than raced against the stop event; and the ingest queue's gap
+record, when it lived inside the queue, could be evicted by the very overflow it
+described and ended up ordered after records that arrived later than the loss.
+
+### What would move any of this
+
+`docs/VALIDATION.md`. It is the queue, in priority order, and the first item on
+it — a K-band capture from a lawful passive source such as an automatic-door
+opener — is ten minutes of work that would promote nine fields from UPSTREAM to
+OBSERVED.

@@ -3,21 +3,33 @@
 # NOT INSTALLED BY ANY SCRIPT IN THIS REPOSITORY, and deliberately so. Copy it
 # into place by hand, once, after a bounded trial has been watched:
 #
-#     sudo cp systemd/unidenr8-collector.service /etc/systemd/system/
+#     sudo install -m 0644 systemd/unidenr8-collector.service /etc/systemd/system/
 #     sudo systemctl daemon-reload
 #     sudo systemctl start unidenr8-collector      # start, and watch it
 #     systemctl status unidenr8-collector
 #
 # Enable it at boot only after that has been observed through a real drive.
 #
-# It deliberately does NOT Require or Want hummer-rfcomm. Ordering after it is
+# ---------------------------------------------------------------------------
+# BEFORE YOU INSTALL THIS, EDIT FOUR THINGS
+#
+#   1. User=                 the account that owns the venv and the bond
+#   2. WorkingDirectory=     where you cloned this repository
+#   3. ExecStart=            the same path, plus /.venv/bin/python
+#   4. ReadWritePaths=       the state directory from your config file
+#
+# and one more if your node has no OBDLink: set `guard = false` under [obd] in
+# the configuration file, or this will refuse to run and be right to.
+# ---------------------------------------------------------------------------
+#
+# It deliberately does NOT Require or Want the RFCOMM unit. Ordering after it is
 # useful; pulling it in is not this unit's business, and a unit that can start
 # the vehicle's RFCOMM binding is a unit that can interfere with it. The
-# collector checks the OBDLink's health itself, read-only, and pauses when it
-# is unhealthy — that check is the real protection, not a dependency edge.
+# collector checks the OBDLink's health itself, read-only, and pauses when it is
+# unhealthy — that check is the real protection, not a dependency edge.
 
 [Unit]
-Description=Uniden R8 BLE collector (receive-only, publishes display state)
+Description=Uniden R8 BLE collector (receive-only, publishes state and events)
 Documentation=file:/home/jeremy/unidenr8/docs/RUNBOOK.md
 After=bluetooth.service hummer-rfcomm.service
 Wants=bluetooth.service
@@ -35,17 +47,21 @@ User=jeremy
 WorkingDirectory=/home/jeremy/unidenr8
 Environment=PYTHONPATH=/home/jeremy/unidenr8/src
 Environment=PYTHONUNBUFFERED=1
+# Naming the configuration file explicitly rather than letting the search find
+# one: a service whose behaviour depends on its working directory is a service
+# that behaves differently when someone runs it by hand to debug it.
+Environment=UNIDEN_R8_CONFIG=/home/jeremy/unidenr8/unidenr8.toml
 UMask=0077
-ExecStart=/home/jeremy/unidenr8/.venv/bin/python -m uniden_r8.cli \
-    collect --state-dir /home/jeremy/unidenr8/.state
+ExecStart=/home/jeremy/unidenr8/.venv/bin/python -m uniden_r8.cli collect
 
 # A crash should be recovered; the collector's own clean exit should not be
 # restarted into a loop.
 Restart=on-failure
 RestartSec=30
 
-# SIGTERM must have time to unsubscribe, release the link and publish a
-# stopped state. The collector handles it; this gives it room.
+# SIGTERM must have time to unsubscribe, release the link, end any open alert
+# track, flush the history writer and publish a stopped state. The collector
+# handles all of that; this gives it room.
 KillSignal=SIGTERM
 TimeoutStopSec=30
 
@@ -57,6 +73,9 @@ AmbientCapabilities=
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
+# The state directory holds state.json, state-v2.json, collector.lock and,
+# when history is enabled, the SQLite database and its -wal/-shm companions.
+# All of them live here, so this is the only writable path the unit needs.
 ReadWritePaths=/home/jeremy/unidenr8/.state
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -66,9 +85,13 @@ RestrictSUIDSGID=true
 RestrictRealtime=true
 LockPersonality=true
 SystemCallArchitectures=native
+# The collector talks to BlueZ over the system D-Bus, to gpsd and to an MQTT
+# broker over TCP, and binds a loopback port for the optional feed. It needs no
+# other address family, and none of those needs raw sockets.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 # This makes an explicit `systemctl enable` possible; nothing in this project
 # invokes it. Do that only after a drive with active OBD polling has also been
-# observed, which the parked five-minute trial did not establish.
+# observed, which a parked trial does not establish.
 WantedBy=multi-user.target

@@ -246,15 +246,111 @@ not fit a recognised shape is recorded as unparsed, with its raw bytes kept,
 rather than reflected into public output. Separate telemetry and alert
 unparsed counters make that visible instead of silent.
 
-**Published output is conservative.** Raw payloads go to the owner-only private
-store. Published output carries voltage, GPS-fix state, a POI-warning boolean,
-and the alert fields a detector exists to report. Heading, speed, altitude and
-POI detail are parsed nowhere and published nowhere: they describe where Jeremy
-is and has been.
+**Published output is conservative by default.** Raw payloads go to the
+owner-only private store. The default output carries voltage, GPS-fix state, a
+POI-warning boolean, and the alert fields a detector exists to report.
+
+Heading, speed, altitude and POI detail *are* decoded now — that changed with
+this build, and the earlier wording that they were "parsed nowhere" is
+withdrawn. What replaced it is a boundary rather than an absence: they appear
+only in the schema-2 document and the local history, both `0600` in a `0700`
+git-ignored directory; they reach a printed terminal only on an explicit
+`live --full`; they reach a broker or the feed only on an explicit
+`detail = true`; they enter the history only on
+`history.record_detector_motion`; and `evidence.publish()` refuses any document
+carrying a coordinate. See §3, "Position is now a category of its own".
 
 The bounded `live` command itself remains a one-shot diagnostic. The separate
 collector below is the only continuous path and its unit is not installed by
 this repository.
+
+### The event path
+
+`uniden_r8/events.py` was added to fix a correctness bug, and it introduced one
+new rule the rest of the project now depends on.
+
+**A notification callback does four things and returns.** Copy the bytes, stamp
+the monotonic and wall clocks, take a sequence number, hand it to a bounded
+queue. Nothing else. Parsing, publishing and disk I/O happen on a separate task,
+because bleak's BlueZ backend delivers notifications as D-Bus signals processed
+on the event loop, and `dbus-daemon` disconnects a client that will not drain its
+socket. A blocking call on that path does not cost latency; it costs the link.
+
+**Nothing slow may run on the event loop, and that is measured.** The OBD probe
+runs two subprocesses with five-second timeouts each and is dispatched to a
+thread; the SQLite writer owns a thread; MQTT uses paho's own network thread;
+the `gpsd` and feed clients are non-blocking asyncio with per-write timeouts. A
+watchdog sleeps 250 ms in a loop and publishes how late it actually was, as
+`health.loop_lag_ms`. `test_the_obd_probe_never_runs_on_the_event_loop` pins the
+first of those.
+
+**A drop is visible.** The queue is bounded and drops its oldest entries, which
+is the right policy when the newest snapshot is the one that matters — but a
+silent drop is a lie. Sequence numbers are assigned in the callback, before
+anything can be lost, and the queue emits a `Gap` record naming the exact first
+and last sequence numbers lost. The gap holds a reserved slot outside the queue
+so the account of a loss cannot be evicted by the overflow it describes.
+
+**Track identity is inference, and it is labelled.** Correlating an alert across
+snapshots is a guess: the protocol's alert-id field reads `00` in every capture
+anyone has published. So every derived event carries the matcher's version and an
+`ambiguous` flag, and the snapshots the matcher worked from are what the history
+stores. A derivation presented as a record would make every future improvement
+invalidate everything already collected.
+
+### The optional sinks
+
+Four things were added that can send data somewhere. Each is **off by default**,
+each fails independently, and none of them can stop the collector reading the
+detector.
+
+| Sink | Default | What it exposes | Where it goes |
+|---|---|---|---|
+| SQLite history | off | alert transitions, throttled telemetry; motion and coordinates only on their own opt-ins | one file, `0600`, in the `0700` state directory, git-ignored |
+| `gpsd` client | off | nothing outward; it *reads* | a loopback socket |
+| MQTT | off | the state document and alert transitions | a broker, i.e. off the machine |
+| HTTP/SSE feed | off | the state document and alert transitions | a loopback port by default |
+
+Two of those deserve their own note.
+
+**MQTT and the feed are the first components here that add sustained radio
+load.** Everything before them was a bounded window; a broker connection and a
+held SSE stream are traffic for the whole drive, on the same 2.4 GHz front end as
+the vehicle's RFCOMM link. The OBD health probe cannot see that: it asks three
+*state* questions and all three stay green while contention triples the link's
+latency. So MQTT publishes alert transitions plus a slow heartbeat and never the
+1 Hz telemetry stream, at QoS 0; the feed binds to loopback; and
+`docs/RUNBOOK.md` makes a with-and-without comparison trial a gate before either
+runs on a drive. `health.telemetry_interval` against the measured 0.97–1.02 s
+baseline is the signal to watch.
+
+**`config.Config.warnings()` says the risky things out loud.** Disabling the OBD
+guard, binding the feed to a non-loopback address, publishing to a remote broker
+without TLS, enabling coordinate recording, and disabling retention each produce
+a warning printed when the collector starts. They are all legal configurations,
+and all things a person may not have meant.
+
+### The inspection command
+
+`uniden_r8/inspection.py` is the only code here that deliberately reads the
+detector's saved coordinates, and it is shaped by that.
+
+It requires `--confirm`, checked at the command *before* anything reaches the
+radio, so a refusal does not first open a link. It reads exactly settings 1,
+settings 2 and the POI database, through `gatt.assert_inspect_readable` — a third
+gate, narrower than the probe's and wider than the live path's. Three gates
+rather than one with a mode parameter, because a single gate with a mode is a
+single gate somebody can pass the wrong mode to. The bytes go to the private
+store and nowhere else; the printed summary carries lengths, byte histograms and
+record-boundary *candidates*, and no device bytes at all.
+
+**It decodes nothing.** Upstream published a candidate POI layout and also
+recorded that the only POI database it ever read was empty. A parser built on
+that could appear to succeed on bytes nobody has ever seen, and its output would
+be somebody's home address. A wrong coordinate printed confidently is worse than
+no coordinate. The same reasoning applies, more weakly, to the settings blocks:
+what this produces is a *snapshot that can be diffed*, and `docs/VALIDATION.md`
+sets out how to turn one physical menu change into one understood byte.
 
 ### The background collector
 
@@ -361,12 +457,57 @@ untracked — for an address pattern. It has no exception list, which is why
 `tests/fixtures.py` assembles test addresses from octets instead of writing
 them out.
 
+### Position is now a category of its own
+
+Until an external GNSS source existed, nothing here could produce a latitude, so
+the publication gate only knew about Bluetooth and host addresses. A gate that
+refuses a MAC address while printing where the vehicle was would be defending the
+wrong thing, so two questions are now asked at that boundary:
+
+* `privacy.looks_like_identifier` — does this still contain an address?
+* `privacy.looks_like_position` — does this contain somewhere the vehicle has
+  been?
+
+The second walks a decoded document by key rather than pattern-matching its text,
+so `{"lat": 33.4}` is caught and `{"voltage": 33.4}` is not, and it also catches a
+decimal-degrees pair in prose. It is deliberately willing to be wrong in the
+cautious direction: refusing to publish a document that merely looks positional
+costs a developer five minutes, and the opposite mistake is permanent.
+
+Three grades of data, three destinations:
+
+| Data | May appear in |
+|---|---|
+| voltage, GPS-fix boolean, band, strength, frequency, direction, mute | anywhere: `state.json`, a display, a broker, this repository |
+| detector heading, speed, altitude; POI warning detail | `state-v2.json` and the history, both `0600` in a `0700` git-ignored directory; a broker or the feed only with `detail = true` |
+| coordinates, POI database bytes, raw packets, addresses | the `0700` private store, or the history with `record_coordinates` explicitly on. Never printed, never committed. |
+
+`.gitignore` covers `.private/`, `.state/`, and every `*.db`/`*.sqlite` with their
+`-wal` and `-shm` companions. That last detail matters more than it looks: the
+`-wal` file holds the most recently written rows, SQLite creates it lazily at the
+first write — long after the umask was closed around `connect()` — and
+`storage.History._secure()` exists to tighten it afterwards. A history that is
+`0600` with a group-readable journal beside it is not a private history.
+
+### Loopback is not an identifier
+
+`127.0.0.1` matches the IPv4 pattern and identifies nobody: every machine has one,
+and a configuration file that cannot write it is a configuration file whose
+documentation has to talk around its own defaults.
+`privacy.is_non_identifying_host` names the exact exemption — loopback, the
+unspecified address, the broadcast address — and nothing else. A private-range
+address is still an identifier, because one plus a little context identifies a
+network. The exemption lives in the redaction module, where a reviewer reading the
+rules will see it, and not as an exception list inside the hygiene test, where it
+would be invisible.
+
 ### Especially private
 
 The POI characteristic is the only one that carries real coordinates: saved
 camera locations and user marks — home, work, and the roads Jeremy drives.
-If it is ever read, the bytes go to `.private/` and nothing derived from them
-is published without a specific decision.
+The `inspect` command reads it only on an explicit `--confirm`, the bytes go to
+`.private/`, and nothing derived from them is decoded or published. See "The
+inspection command" above.
 
 ---
 

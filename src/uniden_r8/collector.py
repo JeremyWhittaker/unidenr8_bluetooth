@@ -1,20 +1,20 @@
-"""Background collector: hold the detector link, publish a display-ready state.
+"""Background collector: hold the detector link, publish what it is saying.
 
-This is the first thing in the project that is meant to run for a long time,
-and length is what makes it different. A 30-second window that competes with
-the vehicle's telemetry link is a nuisance; a process that does it for hours,
-unattended, is a hazard. So the design starts from the OBDLink, not from the
-detector.
+This is the first thing in the project meant to run for a long time, and length
+is what makes it different. A 30-second window that competes with the vehicle's
+telemetry link is a nuisance; a process that does it for hours, unattended, is
+a hazard. So the design starts from the OBDLink, not from the detector.
 
 **The OBDLink is primary, and that is enforced, not assumed.** Before the R8
-link is opened, and every :data:`HEALTH_INTERVAL_SECONDS` while it is held, an
-injected read-only probe checks that ``hummer-rfcomm`` is active and that
-``/dev/rfcomm0`` exists and is bound. If that check fails the detector link is
-released promptly, an ``obd-blocked`` state is published, and the collector
-backs off instead of retrying into a busy radio. The probe only *reads*: it
-runs ``systemctl is-active`` and ``rfcomm`` as queries, opens no serial device,
-and mutates nothing. There is no code path here that starts, stops, restarts,
-enables or disables any unit, or that touches ``/dev/rfcomm0``.
+link is opened, and periodically while it is held, an injected read-only probe
+checks that the configured RFCOMM unit is active and that its device node
+exists and is bound. If that check fails the detector link is released promptly,
+an ``obd-blocked`` state is published, and the collector backs off instead of
+retrying into a busy radio. The probe only *reads*: it runs ``systemctl
+is-active`` and ``rfcomm`` as queries, opens no serial device, and mutates
+nothing. There is no code path here that starts, stops, restarts, enables or
+disables any unit, or that touches the serial device node. It also runs on a
+worker thread, never on the event loop -- see below.
 
 **Nothing is discovered and nothing is paired.** The address comes from BlueZ's
 existing bond, in memory. There is no scan loop, no pairing, no trust change,
@@ -24,22 +24,53 @@ no POI or settings access, and no application-characteristic write.
 directory makes the second one refuse rather than silently steal the link, and
 it is released on every exit path.
 
+The event path, and the bug that shaped it
+------------------------------------------
+The first version of this file updated an in-memory value inside the BLE
+notification callback and wrote the public document on a five-second timer. An
+alert that began at second 1 and cleared at second 3 therefore began and ended
+between two writes, and every consumer saw an unbroken "clear". A radar
+integration that can lose a whole detection is not one.
+
+So notifications are events now. The callback stamps two clocks, takes a
+sequence number, and enqueues; a single consumer parses in arrival order,
+derives ``alert_start`` / ``alert_update`` / ``alert_end`` through
+:mod:`uniden_r8.events`, and publishes *on the transition*. The periodic write
+is demoted to a heartbeat. When the queue does overflow -- it should not, but
+"should not" is not a control -- the drop is recorded as a
+:class:`uniden_r8.events.Gap` carrying the exact sequence numbers lost, so a
+hole in the record is a documented hole rather than an absence nobody can date.
+
+**Nothing slow runs on the event loop.** The same loop carries the BLE
+subscription, and on BlueZ a client that stops draining its D-Bus socket is
+disconnected rather than merely delayed -- so a blocking call here does not cost
+latency, it costs the link. The OBD probe runs in a thread, the history writer
+owns a thread, MQTT runs paho's own network thread, and the GNSS and feed
+clients are non-blocking asyncio. A watchdog measures the loop's own lag and
+publishes it, because that number is the cheapest early warning available for
+every one of those decisions being wrong.
+
 **Raw packets are not retained.** The one-shot ``live`` command remains the
-explicit private diagnostic capture; a long-running process that accumulated
+explicit private diagnostic capture. A long-running process that accumulated
 payloads would grow without bound on a node with 415 MiB of RAM, and would turn
-every crash into a disclosure question. This one keeps counters and the latest
-conservative reading.
+every crash into a disclosure question.
 
 What gets published
 -------------------
-One schema-versioned JSON document, written atomically so a reader never sees a
-half-written file. It carries freshness, health, counters, conservative
-telemetry, recognised alerts, and a short preformatted line a display can print
-without parsing anything.
+Two documents, written atomically into the same owner-only directory.
 
-It never carries an address, a token, a raw payload, heading, speed, altitude,
-POI detail, an arbitrary string echoed from the detector, or exception text that
-might contain an identifier.
+``state.json`` is **schema 1**, unchanged, byte-compatible with the e-paper
+consumer that already reads it. It carries freshness, health, counters,
+conservative telemetry, recognised alerts, and a short preformatted line. It
+never carries an address, a token, a payload, heading, speed, altitude, POI
+detail, a coordinate, an arbitrary string echoed from the detector, or exception
+text.
+
+``state-v2.json`` is **schema 2**: everything above plus the full decoded
+packet surface, the detector's own heading/speed/altitude, per-field confidence
+grades, event and queue metrics, and the external GNSS branch. It is a superset
+in content and a separate file in form, because the existing consumer requires
+``schema == 1`` exactly and breaking it to add fields would be a poor trade.
 """
 
 from __future__ import annotations
@@ -53,12 +84,15 @@ import os
 import random
 import signal
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Final
 
-from .evidence import DIR_MODE, FILE_MODE, utc_stamp
+from .config import Config
+from .events import AlertEvent, AlertTracker, Gap, Ingest, Notification
+from .evidence import DIR_MODE, FILE_MODE, iso_from_wall_ns, utc_stamp, utc_stamp_ms
 from .gatt import (
     ALERT_UUID,
     TELEMETRY_UUID,
@@ -66,38 +100,47 @@ from .gatt import (
     assert_live_readable,
 )
 from .telemetry import (
+    FIELD_CONFIDENCE,
     Alert,
     Telemetry,
     check_compatibility,
-    parse_alerts,
+    parse_alert_snapshot,
     parse_telemetry,
 )
 
 __all__ = [
     "SCHEMA_VERSION",
+    "DETAIL_SCHEMA_VERSION",
     "RECOGNISED_BANDS",
     "ObdHealth",
     "CollectorState",
     "SingleInstanceLock",
     "InstanceBusy",
     "default_obd_probe",
+    "make_obd_probe",
+    "unguarded_obd_probe",
+    "Sinks",
     "publish_state",
     "next_backoff",
     "display_line",
     "build_document",
+    "build_detail_document",
     "run",
 ]
 
-#: Bumped whenever the published document's shape changes.  A consumer that
-#: does not recognise the version should show "unknown" rather than guess.
+#: The document the e-paper display reads.  Frozen: a consumer that requires
+#: ``schema == 1`` exists, and adding fields it cannot use is not worth
+#: breaking it.  New surface goes to :data:`DETAIL_SCHEMA_VERSION` instead.
 SCHEMA_VERSION: Final[int] = 1
+
+#: The full document, in its own file.
+DETAIL_SCHEMA_VERSION: Final[int] = 2
 
 #: How often the OBD health probe runs while the detector link is held.
 HEALTH_INTERVAL_SECONDS: Final[float] = 15.0
 
-#: How often the state document is rewritten while streaming.  The e-paper
-#: display refreshes at 300 s, so anything faster than this is for other
-#: consumers, not for the panel.
+#: How often state is rewritten when nothing has changed.  Alert transitions
+#: publish immediately; this is the floor, not the rate.
 PUBLISH_INTERVAL_SECONDS: Final[float] = 5.0
 
 #: Telemetry arrives about once a second.  Past this, the reading on screen is
@@ -123,6 +166,19 @@ CONNECT_TIMEOUT_SECONDS: Final[float] = 25.0
 #: unbounded list from a malformed packet would be a memory bug on this node.
 MAX_PUBLISHED_ALERTS: Final[int] = 8
 
+#: How many recent inter-packet intervals to keep for the timing summary.
+#: About two minutes at the observed 1 Hz cadence -- long enough for a
+#: percentile to mean something, short enough to react within a drive.
+INTERVAL_WINDOW: Final[int] = 120
+
+#: How often the loop-lag watchdog wakes.  Its overshoot *is* the measurement.
+WATCHDOG_INTERVAL_SECONDS: Final[float] = 0.25
+
+#: Loop lag past this is reported as unhealthy.  A quarter-second timer that
+#: fires a full second late means something on this loop blocked for the best
+#: part of a second, which is the same order as a D-Bus disconnect threshold.
+LOOP_LAG_ALARM_MS: Final[float] = 1000.0
+
 #: Bands this project will name.  A band outside this set is published as
 #: ``"unknown"`` rather than echoed: the state file is a public artifact and
 #: must not carry arbitrary strings from the device.
@@ -136,9 +192,17 @@ _RECOGNISED_DIRECTIONS: Final[frozenset[str]] = frozenset({"front", "side", "rea
 _RFCOMM_DEVICE: Final[str] = "/dev/rfcomm0"
 _RFCOMM_UNIT: Final[str] = "hummer-rfcomm"
 
+_TELEMETRY: Final[str] = "telemetry"
+_ALERT: Final[str] = "alert"
+
 
 class InstanceBusy(RuntimeError):
     """Another collector already holds the lock."""
+
+
+# --------------------------------------------------------------------------
+# The OBDLink gate
+# --------------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -163,51 +227,83 @@ class ObdHealth:
         }
 
 
-def default_obd_probe() -> ObdHealth:
-    """Read-only OBDLink health check.
+def make_obd_probe(
+    unit: str = _RFCOMM_UNIT, device: str = _RFCOMM_DEVICE
+) -> Callable[[], ObdHealth]:
+    """Build a read-only OBDLink health check for a named unit and device.
 
     Three questions, all queries: is the unit active, does the device node
     exist, and does BlueZ report a binding on it.  Nothing here mutates a unit,
-    a binding, or the controller, and nothing opens the serial device — opening
-    ``/dev/rfcomm0`` is exactly what the collector must never do.
+    a binding, or the controller, and nothing opens the serial device -- opening
+    it is exactly what the collector must never do.
 
-    The reason string is drawn from a fixed vocabulary.  Subprocess output can
-    contain a Bluetooth address, and this value is published.
+    The unit and device are parameters rather than constants because a node
+    that is not Jeremy's Hummer has neither, and hard-coding them was what made
+    the first version of this file unusable anywhere else.  The reason strings
+    stay a fixed vocabulary: subprocess output can contain a Bluetooth address,
+    and this value is published.
     """
-    import shutil  # noqa: PLC0415 - only needed on the real path
-    import subprocess  # noqa: PLC0415 - queries only; see module docstring
 
-    def query(args: list[str], timeout: float = 5.0) -> tuple[int, str]:
-        if shutil.which(args[0]) is None:
-            return 127, ""
-        try:
-            done = subprocess.run(  # noqa: S603 - fixed binaries, literal args
-                args, capture_output=True, text=True, timeout=timeout, check=False
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            return 124, ""
-        return done.returncode, (done.stdout or "")
+    def probe() -> ObdHealth:
+        import shutil  # noqa: PLC0415 - only needed on the real path
+        import subprocess  # noqa: PLC0415 - queries only; see the docstring
 
-    _, active_out = query(["systemctl", "is-active", _RFCOMM_UNIT])
-    rfcomm_active = active_out.strip() == "active"
+        def query(args: list[str], timeout: float = 5.0) -> tuple[int, str]:
+            if shutil.which(args[0]) is None:
+                return 127, ""
+            try:
+                done = subprocess.run(  # noqa: S603 - fixed binaries, literal args
+                    args, capture_output=True, text=True, timeout=timeout, check=False
+                )
+            except (subprocess.TimeoutExpired, OSError):
+                return 124, ""
+            return done.returncode, (done.stdout or "")
 
-    device_present = Path(_RFCOMM_DEVICE).exists()
+        _, active_out = query(["systemctl", "is-active", unit])
+        rfcomm_active = active_out.strip() == "active"
 
-    _, rfcomm_out = query(["rfcomm"])
-    bound = any(
-        line.strip().startswith("rfcomm0:") for line in rfcomm_out.splitlines()
-    )
+        device_present = Path(device).exists()
 
-    if not rfcomm_active:
-        return ObdHealth(False, rfcomm_active, device_present, bound,
-                         "hummer-rfcomm is not active")
-    if not device_present:
-        return ObdHealth(False, rfcomm_active, device_present, bound,
-                         "/dev/rfcomm0 is missing")
-    if not bound:
-        return ObdHealth(False, rfcomm_active, device_present, bound,
-                         "/dev/rfcomm0 is not bound")
-    return ObdHealth(True, rfcomm_active, device_present, bound, "")
+        _, rfcomm_out = query(["rfcomm"])
+        node = Path(device).name
+        bound = any(
+            line.strip().startswith(f"{node}:") for line in rfcomm_out.splitlines()
+        )
+
+        if not rfcomm_active:
+            return ObdHealth(False, rfcomm_active, device_present, bound,
+                             f"{unit} is not active")
+        if not device_present:
+            return ObdHealth(False, rfcomm_active, device_present, bound,
+                             f"{device} is missing")
+        if not bound:
+            return ObdHealth(False, rfcomm_active, device_present, bound,
+                             f"{device} is not bound")
+        return ObdHealth(True, rfcomm_active, device_present, bound, "")
+
+    return probe
+
+
+def default_obd_probe() -> ObdHealth:
+    """The Hummer node's probe: the module defaults, read at call time.
+
+    A thin wrapper rather than a pre-built closure so that
+    :data:`_RFCOMM_UNIT` and :data:`_RFCOMM_DEVICE` remain the single source of
+    truth -- and so a test can point the device check at a path that exists on
+    a workstation without also having to rebuild the probe.
+    """
+    return make_obd_probe(_RFCOMM_UNIT, _RFCOMM_DEVICE)()
+
+
+def unguarded_obd_probe() -> ObdHealth:
+    """Always healthy: for a node that has no OBDLink to protect.
+
+    Not a way of switching the guard off on a node that *does* have one.  The
+    configuration says which, the warning in
+    :meth:`uniden_r8.config.Config.warnings` says it out loud, and the state
+    document records that the gate was not armed.
+    """
+    return ObdHealth(True, True, True, True, "guard disabled by configuration")
 
 
 class SingleInstanceLock:
@@ -257,24 +353,81 @@ class SingleInstanceLock:
         self.release()
 
 
+# --------------------------------------------------------------------------
+# State
+# --------------------------------------------------------------------------
+
+
+@dataclass
+class Timing:
+    """Inter-packet intervals, summarised.
+
+    Worth publishing for a reason that is not obvious: the OBD health probe
+    asks three *state* questions and all three stay green while radio
+    contention quietly triples this link's latency.  A widened 95th percentile
+    against the 0.97-1.02 s baseline recorded in ``docs/EVIDENCE.md`` §7.2 is
+    the only cheap signal this project has for coexistence trouble.
+    """
+
+    intervals: deque[float] = field(
+        default_factory=lambda: deque(maxlen=INTERVAL_WINDOW)
+    )
+    last_monotonic_ns: int = 0
+
+    def record(self, monotonic_ns: int) -> None:
+        if self.last_monotonic_ns:
+            self.intervals.append((monotonic_ns - self.last_monotonic_ns) / 1e9)
+        self.last_monotonic_ns = monotonic_ns
+
+    def summary(self) -> dict[str, Any]:
+        if not self.intervals:
+            return {"samples": 0, "median_s": None, "p95_s": None, "max_s": None}
+        ordered = sorted(self.intervals)
+        return {
+            "samples": len(ordered),
+            "median_s": round(ordered[len(ordered) // 2], 3),
+            "p95_s": round(ordered[min(len(ordered) - 1, int(len(ordered) * 0.95))], 3),
+            "max_s": round(ordered[-1], 3),
+        }
+
+
 @dataclass
 class CollectorState:
-    """Everything the published document is built from."""
+    """Everything the published documents are built from."""
 
     mode: str = "continuous"
     status: str = "starting"
     started_at: str = field(default_factory=utc_stamp)
     obd: ObdHealth = field(default_factory=lambda: ObdHealth(False))
+    obd_guarded: bool = True
+    adapter: str = ""
     connected: bool = False
     compatible: bool = False
     reconnects: int = 0
     telemetry_packets: int = 0
     alert_packets: int = 0
     unparsed_telemetry: int = 0
+    unparsed_alert_packets: int = 0
+    unreadable_slots: int = 0
+    unknown_mute_codes: int = 0
     latest: Telemetry | None = None
     latest_at: float | None = None
     alerts: list[Alert] = field(default_factory=list)
     note: str = ""
+    #: Sequence number of the last notification the consumer processed.
+    seq: int = 0
+    queue: dict[str, int] = field(default_factory=dict)
+    gaps: int = 0
+    lost_notifications: int = 0
+    loop_lag_ms: float = 0.0
+    loop_lag_max_ms: float = 0.0
+    timing: Timing = field(default_factory=Timing)
+    open_tracks: list[dict[str, Any]] = field(default_factory=list)
+    recent_events: deque[dict[str, Any]] = field(
+        default_factory=lambda: deque(maxlen=20)
+    )
+    sinks: dict[str, Any] = field(default_factory=dict)
+    gnss: dict[str, Any] | None = None
 
     def age_seconds(self, now: float | None = None) -> float | None:
         if self.latest_at is None:
@@ -318,6 +471,24 @@ def _publishable_alert(alert: Alert) -> dict[str, Any]:
     }
 
 
+def _detailed_alert(alert: Alert) -> dict[str, Any]:
+    """The full alert, with the same allowlisting applied to its strings.
+
+    Every value the detector supplies as text -- band, direction, the mute
+    code, the receive mode -- is either mapped through an allowlist or carried
+    as a short validated token.  The schema-2 document is owner-only rather than
+    published, but "owner-only" is a permission, not a reason to relax what goes
+    into a file something else will parse.
+    """
+    detailed = alert.detailed()
+    detailed["band"] = _safe_band(alert.band)
+    detailed["direction"] = _safe_direction(alert.direction_name)
+    # Tri-state, unlike the schema-1 view: an unrecognised mute code means "we
+    # do not know", and publishing that as "not muted" would be a claim.
+    detailed["muted"] = alert.muted
+    return detailed
+
+
 def display_line(state: CollectorState, stale: bool) -> str:  # noqa: PLR0911
     """One short line a display can print without parsing anything.
 
@@ -339,7 +510,7 @@ def display_line(state: CollectorState, stale: bool) -> str:  # noqa: PLR0911
 
     voltage = (
         f"{state.latest.voltage:.1f}V"
-        if isinstance(state.latest.voltage, float)
+        if isinstance(state.latest.voltage, float) and state.latest.parsed
         else "--V"
     )
     gps = "GPS" if state.latest.gps_locked else "no-fix"
@@ -353,10 +524,23 @@ def display_line(state: CollectorState, stale: bool) -> str:  # noqa: PLR0911
 
 
 def build_document(state: CollectorState, now: float | None = None) -> dict[str, Any]:
-    """Assemble the published document.  Nothing here may carry an identifier."""
+    """Assemble the schema-1 document.
+
+    Frozen in shape.  Nothing here may carry an identifier, a coordinate, the
+    detector's heading, speed or altitude, POI detail, a payload, or exception
+    text -- and nothing here may carry a nanosecond timestamp either, because a
+    consumer built against this shape has no field to put one in.
+
+    Telemetry values are gated on the *confirmed* packet shape.  A packet with
+    an unexpected field count may still have decoded, and its values are in the
+    schema-2 document with their grade attached; this document reports the shape
+    as unconfirmed and the readings as absent, which is what a consumer with no
+    way to express "probably" should be told.
+    """
     age = state.age_seconds(now)
     stale = age is not None and age > STALE_AFTER_SECONDS
     latest = state.latest
+    confirmed = bool(latest and latest.shape_confirmed)
     return {
         "schema": SCHEMA_VERSION,
         "updated_at": utc_stamp(),
@@ -375,9 +559,10 @@ def build_document(state: CollectorState, now: float | None = None) -> dict[str,
             "unparsed_telemetry": state.unparsed_telemetry,
         },
         "telemetry": {
-            "voltage": latest.voltage if latest else None,
-            "gps_locked": latest.gps_locked if latest else None,
-            "poi_warning": bool(latest.poi_warning) if latest else False,
+            "voltage": latest.voltage if confirmed else None,
+            "gps_locked": latest.gps_locked if confirmed else None,
+            "poi_warning": bool(latest.poi_warning) if confirmed else False,
+            "shape_confirmed": confirmed,
             "age_s": round(age, 1) if age is not None else None,
             "stale": stale,
         },
@@ -386,22 +571,76 @@ def build_document(state: CollectorState, now: float | None = None) -> dict[str,
     }
 
 
-def publish_state(state_dir: Path, state: CollectorState,
-                  now: float | None = None) -> Path:
-    """Write the document atomically, ``0600`` in a ``0700`` directory.
+def build_detail_document(
+    state: CollectorState, now: float | None = None
+) -> dict[str, Any]:
+    """Assemble the schema-2 document: everything, with its provenance.
+
+    A superset of schema 1 in content, a separate file in form.  It carries the
+    detector's own heading, speed and altitude, which are position-adjacent --
+    a log of them is a rough trace of a drive -- so it lives ``0600`` in a
+    ``0700`` directory, is git-ignored, and is not what a display or a broker
+    receives unless the operator turns that on.
+    """
+    age = state.age_seconds(now)
+    stale = age is not None and age > STALE_AFTER_SECONDS
+    latest = state.latest
+    return {
+        "schema": DETAIL_SCHEMA_VERSION,
+        "updated_at": utc_stamp_ms(),
+        "seq": state.seq,
+        "collector": {
+            "mode": state.mode,
+            "status": state.status,
+            "started_at": state.started_at,
+            "reconnects": state.reconnects,
+            "adapter": state.adapter or None,
+            "note": state.note,
+        },
+        "obd": {**state.obd.as_dict(), "guard_enabled": state.obd_guarded},
+        "link": {
+            "connected": state.connected,
+            "compatible": state.compatible,
+            "last_packet_age_s": round(age, 3) if age is not None else None,
+            "stale": stale,
+        },
+        "counters": {
+            "telemetry_packets": state.telemetry_packets,
+            "alert_packets": state.alert_packets,
+            "unparsed_telemetry": state.unparsed_telemetry,
+            "unparsed_alert_packets": state.unparsed_alert_packets,
+            "unreadable_slots": state.unreadable_slots,
+            "unknown_mute_codes": state.unknown_mute_codes,
+        },
+        "ingest": {
+            **state.queue,
+            "gaps": state.gaps,
+            "lost_notifications": state.lost_notifications,
+        },
+        "health": {
+            "loop_lag_ms": round(state.loop_lag_ms, 1),
+            "loop_lag_max_ms": round(state.loop_lag_max_ms, 1),
+            "loop_lag_alarm": state.loop_lag_max_ms > LOOP_LAG_ALARM_MS,
+            "telemetry_interval": state.timing.summary(),
+        },
+        "detector": latest.detailed() if latest else None,
+        "vehicle_gnss": state.gnss,
+        "alerts": [_detailed_alert(a) for a in state.alerts[:MAX_PUBLISHED_ALERTS]],
+        "open_tracks": list(state.open_tracks),
+        "recent_events": list(state.recent_events),
+        "sinks": dict(state.sinks),
+        "confidence": dict(FIELD_CONFIDENCE),
+    }
+
+
+def _write_atomic(target: Path, payload: str) -> None:
+    """Write ``0600``, atomically.
 
     Atomic because a display may read at any moment and a half-written file is
     worse than a stale one: ``os.replace`` is atomic within a filesystem, so a
     reader sees either the previous document or the new one, never a partial.
     """
-    state_dir = Path(state_dir)
-    state_dir.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    os.chmod(state_dir, DIR_MODE)
-
-    target = state_dir / "state.json"
-    temporary = state_dir / f".state.json.{os.getpid()}.tmp"
-    payload = json.dumps(build_document(state, now), indent=2, sort_keys=True) + "\n"
-
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     previous = os.umask(0o077)
     try:
         temporary.write_text(payload, encoding="utf-8")
@@ -409,6 +648,39 @@ def publish_state(state_dir: Path, state: CollectorState,
         os.umask(previous)
     os.chmod(temporary, FILE_MODE)
     os.replace(temporary, target)
+
+
+def publish_state(
+    state_dir: Path,
+    state: CollectorState,
+    now: float | None = None,
+    *,
+    detail: bool = False,
+) -> Path:
+    """Write the document or documents, atomically, ``0600`` in a ``0700`` dir.
+
+    The schema-1 file is written last.  Both files describe the same instant,
+    and a consumer that polls the pair is better off seeing a schema-2 document
+    that is momentarily ahead than one that is momentarily behind: ahead is a
+    reading it has not shown yet, behind is a reading it has already shown
+    being contradicted.
+    """
+    state_dir = Path(state_dir)
+    state_dir.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+    os.chmod(state_dir, DIR_MODE)
+
+    if detail:
+        _write_atomic(
+            state_dir / "state-v2.json",
+            json.dumps(build_detail_document(state, now), indent=2, sort_keys=True)
+            + "\n",
+        )
+
+    target = state_dir / "state.json"
+    _write_atomic(
+        target,
+        json.dumps(build_document(state, now), indent=2, sort_keys=True) + "\n",
+    )
     return target
 
 
@@ -426,133 +698,421 @@ def next_backoff(attempt: int, rng: Callable[[], float] = random.random) -> floa
     return max(0.5, capped - spread + (2.0 * spread * rng()))
 
 
-def _default_client(address: str):
-    from bleak import BleakClient  # noqa: PLC0415 - deliberate lazy import
+# --------------------------------------------------------------------------
+# Sinks
+# --------------------------------------------------------------------------
 
-    return BleakClient(address, timeout=CONNECT_TIMEOUT_SECONDS)
 
+class Sinks:
+    """Everything the collector can send data to, started and stopped together.
 
-async def _stream(  # noqa: PLR0913, PLR0917 - every parameter is an injection seam
-    address: str,
-    state: CollectorState,
-    state_dir: Path,
-    stop: asyncio.Event,
-    obd_probe: Callable[[], ObdHealth],
-    client_factory: Callable[[str], Any],
-    deadline: float | None = None,
-) -> float:
-    """Hold one session.  Returns how long it lasted, in seconds.
-
-    Returning the duration is what lets the caller tell a healthy session from
-    a link that connected and dropped immediately; without that distinction a
-    flapping detector resets the backoff on every failure and retries forever.
-
-    ``deadline`` is the trial bound, and it has to be honoured *here* as well
-    as between sessions.  The streaming loop below is the one place that can
-    run indefinitely: a session that stays healthy never returns on its own, so
-    a ``--duration`` checked only by the caller would bound every trial except
-    the ones that actually worked.
+    Each one is optional, each one fails independently, and none of them can
+    stop the collector.  A broker that is down, a GNSS receiver that is
+    unplugged and an SD card that is full are all conditions the vehicle will
+    produce, and in every one of them the right behaviour is to keep reading the
+    detector and say in the state document that the sink is unhealthy.
     """
-    began = time.monotonic()
-    build = client_factory or _default_client
 
-    # `async with` releases the link on every path out of this function --
-    # normal return, exception, or cancellation from a signal.  A held link
-    # matters: the detector stops advertising while connected.
-    async with build(address) as client:
-        state.connected = True
-        state.note = ""
+    def __init__(self, config: Config) -> None:
+        self.config = config
+        self.history: Any = None
+        self.gnss: Any = None
+        self.mqtt: Any = None
+        self.feed: Any = None
+        self._gnss_task: asyncio.Task | None = None
 
-        missing = check_compatibility(client)
-        if missing:
-            state.compatible = False
-            state.status = "incompatible"
-            state.note = f"{len(missing)} required attribute(s) absent"
-            publish_state(state_dir, state)
-            return time.monotonic() - began
-        state.compatible = True
+    async def start(self, stop: asyncio.Event, *, adapter: str = "") -> None:
+        cfg = self.config
+        if cfg.history.enabled:
+            from .storage import HistoryWriter  # noqa: PLC0415 - optional path
 
-        for uuid in (TELEMETRY_UUID, ALERT_UUID):
-            permitted = assert_live_readable(uuid)
-            try:
-                payload = bytes(await client.read_gatt_char(permitted))
-            except Exception:  # noqa: BLE001 - absence is evidence, not fatal
-                continue
-            if uuid == TELEMETRY_UUID:
-                state.record_telemetry(parse_telemetry(payload))
-            else:
-                state.record_alerts(parse_alerts(payload))
+            monotonic_ns, wall_ns = time.monotonic_ns(), time.time_ns()
+            self.history = HistoryWriter(
+                cfg.history_path,
+                retain_days=cfg.history.retain_days,
+                record_motion=cfg.history.record_detector_motion,
+                record_coordinates=cfg.gnss.record_coordinates,
+            )
+            self.history.start(
+                started_at=iso_from_wall_ns(wall_ns), wall_ns=wall_ns,
+                monotonic_ns=monotonic_ns, adapter=adapter,
+            )
 
-        def on_telemetry(_sender: Any, data: bytearray) -> None:
-            # bleak calls this from the event loop.  It must never raise: an
-            # exception here vanishes into the BLE machinery and takes the
-            # subscription with it.  Nothing is retained but the parsed value.
+        if cfg.gnss.enabled:
+            from .gnss import GnssClient  # noqa: PLC0415 - optional path
+
+            self.gnss = GnssClient(
+                cfg.gnss.host, cfg.gnss.port,
+                record_coordinates=cfg.gnss.record_coordinates,
+                stale_after_seconds=cfg.gnss.stale_after_seconds,
+            )
+            self._gnss_task = asyncio.create_task(self.gnss.run(stop))
+
+        if cfg.mqtt.enabled:
+            from .config import read_password  # noqa: PLC0415
+            from .mqtt import MqttPublisher  # noqa: PLC0415 - optional extra
+
+            self.mqtt = MqttPublisher(
+                host=cfg.mqtt.host, port=cfg.mqtt.port,
+                username=cfg.mqtt.username, password=read_password(cfg),
+                base_topic=cfg.mqtt.base_topic, detail=cfg.mqtt.detail,
+                tls=cfg.mqtt.tls, home_assistant=cfg.mqtt.home_assistant,
+            )
+            self.mqtt.start()
+
+        if cfg.feed.enabled:
+            from .feed import StateFeed  # noqa: PLC0415 - optional path
+
+            self.feed = StateFeed(cfg.feed.bind, cfg.feed.port, detail=cfg.feed.detail)
+            await self.feed.start()
+
+    async def close(self) -> None:
+        if self._gnss_task is not None:
+            self._gnss_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await self._gnss_task
+            self._gnss_task = None
+        if self.feed is not None:
             with contextlib.suppress(Exception):
-                state.record_telemetry(parse_telemetry(data))
-
-        def on_alert(_sender: Any, data: bytearray) -> None:
+                await self.feed.stop()
+        if self.mqtt is not None:
             with contextlib.suppress(Exception):
-                state.record_alerts(parse_alerts(data))
+                self.mqtt.stop()
+        if self.history is not None:
+            with contextlib.suppress(Exception):
+                self.history.stop()
 
-        # Subscribing writes a CCCD: a protocol descriptor write, and the only
-        # write of any kind this module performs.
-        subscribed: list[str] = []
+    def status(self) -> dict[str, Any]:
+        return {
+            "history": self.history.status() if self.history else {"enabled": False},
+            "gnss": self.gnss.status() if self.gnss else {"enabled": False},
+            "mqtt": self.mqtt.status() if self.mqtt else {"enabled": False},
+            "feed": self.feed.status() if self.feed else {"enabled": False},
+        }
+
+
+# --------------------------------------------------------------------------
+# The session
+# --------------------------------------------------------------------------
+
+
+def _default_client_factory(adapter: str = "") -> Callable[[str], Any]:
+    """Build a bleak client factory, pinned to an adapter if one is named.
+
+    Pinning matters on a node with two controllers.  Left unset, bleak asks
+    BlueZ for its default adapter, which is the first powered one -- an order
+    that is not guaranteed across reboots.  The documented remedy for RFCOMM
+    contention is a second USB dongle, and a second dongle is useless if the
+    collector might pick either.
+    """
+
+    def build(address: str) -> Any:
+        from bleak import BleakClient  # noqa: PLC0415 - deliberate lazy import
+
+        if adapter:
+            # bleak 3.x: the bare `adapter=` keyword is deprecated.
+            return BleakClient(
+                address, timeout=CONNECT_TIMEOUT_SECONDS,
+                bluez={"adapter": adapter},
+            )
+        return BleakClient(address, timeout=CONNECT_TIMEOUT_SECONDS)
+
+    return build
+
+
+class _Session:
+    """One held link, from connect to teardown.
+
+    A class rather than a function because the notification callbacks, the
+    consumer loop and the teardown all need the same handful of objects, and
+    threading eight parameters through three closures was how the first version
+    of this file became hard to follow.
+    """
+
+    def __init__(  # noqa: PLR0913, PLR0917 - every parameter is a seam
+        self,
+        address: str,
+        state: CollectorState,
+        state_dir: Path,
+        stop: asyncio.Event,
+        obd_probe: Callable[[], ObdHealth],
+        client_factory: Callable[[str], Any],
+        config: Config,
+        sinks: Sinks,
+        deadline: float | None = None,
+    ) -> None:
+        self.address = address
+        self.state = state
+        self.state_dir = state_dir
+        self.stop = stop
+        self.obd_probe = obd_probe
+        self.client_factory = client_factory
+        self.config = config
+        self.sinks = sinks
+        self.deadline = deadline
+        self.ingest = Ingest(config.collector.queue_size)
+        self.tracker = AlertTracker()
+        self.wake = asyncio.Event()
+        self.last_history_telemetry = 0.0
+        self.expected_seq = 0
+
+    # ------------------------------------------------------------ callbacks
+
+    def _on_notification(self, kind: str, data: Any) -> None:
+        """The whole of what happens on bleak's notification path.
+
+        Copy, stamp, number, enqueue, wake.  No parsing, no disk, no locks.
+        The exception guard is narrow on purpose: swallowing everything here is
+        how a queue overflow becomes invisible, so only the enqueue itself is
+        protected and the failure is counted rather than discarded.
+        """
         try:
-            for uuid, handler in ((TELEMETRY_UUID, on_telemetry),
-                                  (ALERT_UUID, on_alert)):
-                permitted = assert_live_notifiable(uuid)
-                try:
-                    await client.start_notify(permitted, handler)
-                    subscribed.append(permitted)
-                except Exception:  # noqa: BLE001
-                    state.note = "partial subscription"
+            self.ingest.offer(kind, bytes(data))
+        except Exception:  # noqa: BLE001 - must never reach the BLE machinery
+            self.state.lost_notifications += 1
+        self.wake.set()
 
-            if not subscribed:
-                state.status = "degraded"
-                publish_state(state_dir, state)
+    # -------------------------------------------------------------- consume
+
+    def _consume(self) -> list[AlertEvent]:
+        """Drain the queue, in arrival order, and return the transitions."""
+        events: list[AlertEvent] = []
+        while (record := self.ingest.pop()) is not None:
+            if isinstance(record, Gap):
+                self.state.gaps += 1
+                self.state.lost_notifications += record.count
+                self.state.recent_events.appendleft(record.as_dict())
+                # A gap means snapshots were lost, so what the tracker believes
+                # about open threats may be wrong.  Saying so is better than
+                # quietly carrying on.
+                self.state.note = "notifications dropped"
+                continue
+            events.extend(self._apply(record))
+        return events
+
+    def _apply(self, note: Notification) -> list[AlertEvent]:
+        self.state.seq = note.seq
+        if note.kind == _TELEMETRY:
+            self.state.timing.record(note.monotonic_ns)
+            reading = parse_telemetry(note.payload)
+            self.state.record_telemetry(reading)
+            self._record_history_telemetry(reading, note)
+            return []
+
+        snapshot = parse_alert_snapshot(note.payload)
+        self.state.record_alerts(snapshot.alerts)
+        if not snapshot.recognised:
+            self.state.unparsed_alert_packets += 1
+        self.state.unreadable_slots += snapshot.rejected_slots
+        self.state.unknown_mute_codes += snapshot.unknown_mute_codes
+
+        # A slot that arrived and could not be read holds every open track
+        # open.  Absence and failure are different facts, and ending a track on
+        # a decode failure would fabricate a whole alert lifecycle from one bad
+        # byte -- permanently, in the history.
+        return self.tracker.observe(
+            snapshot.alerts, seq=note.seq,
+            monotonic_ns=note.monotonic_ns, wall_ns=note.wall_ns,
+            hold_open=snapshot.uncertain,
+        )
+
+    def _record_history_telemetry(
+        self, reading: Telemetry, note: Notification
+    ) -> None:
+        if self.sinks.history is None:
+            return
+        every = self.config.history.telemetry_every_seconds
+        now = note.monotonic_ns / 1e9
+        if every and now - self.last_history_telemetry < every:
+            return
+        self.last_history_telemetry = now
+        self.sinks.history.record_telemetry(
+            reading, wall_ns=note.wall_ns, monotonic_ns=note.monotonic_ns
+        )
+
+    # -------------------------------------------------------------- publish
+
+    def _fix(self) -> Any:
+        return self.sinks.gnss.fix if self.sinks.gnss is not None else None
+
+    def _dispatch(self, events: list[AlertEvent]) -> None:
+        """Send transitions everywhere they go.  Never raises."""
+        fix = self._fix()
+        for event in events:
+            record = event.as_dict()
+            self.state.recent_events.appendleft(record)
+            if self.sinks.history is not None:
+                self.sinks.history.record_alert_event(event, fix)
+            if self.sinks.mqtt is not None:
+                self.sinks.mqtt.publish_event(record)
+            if self.sinks.feed is not None:
+                self.sinks.feed.publish_event(record)
+
+    def _publish(self, now: float | None = None) -> None:
+        state = self.state
+        state.queue = self.ingest.metrics.as_dict()
+        state.open_tracks = [track.summary() for track in self.tracker.open_tracks]
+        state.sinks = self.sinks.status()
+        fix = self._fix()
+        state.gnss = (
+            fix.detailed(include_coordinates=self.config.gnss.record_coordinates)
+            if fix is not None else None
+        )
+        publish_state(
+            self.state_dir, state, now, detail=self.config.collector.detail
+        )
+        if self.sinks.mqtt is not None:
+            self.sinks.mqtt.publish_state(
+                build_detail_document(state, now) if self.config.mqtt.detail
+                else build_document(state, now)
+            )
+        if self.sinks.feed is not None:
+            self.sinks.feed.publish_state(
+                build_detail_document(state, now) if self.config.feed.detail
+                else build_document(state, now)
+            )
+
+    # ------------------------------------------------------------------ run
+
+    async def run(self) -> float:
+        """Hold one session.  Returns how long it lasted, in seconds.
+
+        Returning the duration is what lets the caller tell a healthy session
+        from a link that connected and dropped immediately; without that
+        distinction a flapping detector resets the backoff on every failure and
+        retries forever.
+        """
+        began = time.monotonic()
+        state = self.state
+
+        # `async with` releases the link on every path out of this function --
+        # normal return, exception, or cancellation from a signal.  A held link
+        # matters: the detector stops advertising while connected.
+        async with self.client_factory(self.address) as client:
+            state.connected = True
+            state.note = ""
+
+            missing = check_compatibility(client)
+            if missing:
+                state.compatible = False
+                state.status = "incompatible"
+                state.note = f"{len(missing)} required attribute(s) absent"
+                self._publish()
                 return time.monotonic() - began
+            state.compatible = True
 
-            state.status = "streaming"
-            publish_state(state_dir, state)
+            for uuid in (TELEMETRY_UUID, ALERT_UUID):
+                permitted = assert_live_readable(uuid)
+                try:
+                    payload = bytes(await client.read_gatt_char(permitted))
+                except Exception:  # noqa: BLE001 - absence is evidence, not fatal
+                    continue
+                kind = _TELEMETRY if uuid == TELEMETRY_UUID else _ALERT
+                self.ingest.offer(kind, payload, source="read")
+            self._dispatch(self._consume())
 
-            last_health = time.monotonic()
-            while not stop.is_set():
-                wait_seconds = PUBLISH_INTERVAL_SECONDS
-                if deadline is not None:
-                    wait_seconds = min(
-                        wait_seconds, max(0.0, deadline - time.monotonic())
-                    )
-                if wait_seconds <= 0:
-                    break
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=wait_seconds)
-                now = time.monotonic()
+            subscribed: list[str] = []
+            try:
+                # Subscribing writes a CCCD: a protocol descriptor write, and
+                # the only write of any kind this module performs.
+                for uuid, kind in ((TELEMETRY_UUID, _TELEMETRY), (ALERT_UUID, _ALERT)):
+                    permitted = assert_live_notifiable(uuid)
+                    try:
+                        await client.start_notify(
+                            permitted,
+                            lambda _s, data, kind=kind: self._on_notification(kind, data),
+                        )
+                        subscribed.append(permitted)
+                    except Exception:  # noqa: BLE001
+                        state.note = "partial subscription"
 
-                # The OBDLink comes first.  If it is no longer healthy the
-                # detector link is released immediately rather than at the end
-                # of some longer cycle.
-                if now - last_health >= HEALTH_INTERVAL_SECONDS:
-                    last_health = now
-                    state.obd = obd_probe()
-                    if not state.obd.healthy:
-                        state.status = "obd-blocked"
-                        publish_state(state_dir, state, now)
-                        return time.monotonic() - began
+                if not subscribed:
+                    state.status = "degraded"
+                    self._publish()
+                    return time.monotonic() - began
 
-                if not getattr(client, "is_connected", True):
-                    state.note = "link dropped"
-                    break
+                state.status = "streaming"
+                self._publish()
+                await self._pump(client)
+            finally:
+                for permitted in subscribed:
+                    with contextlib.suppress(Exception):
+                        await client.stop_notify(permitted)
+                # Whatever arrived before teardown is still worth having, and
+                # any threat still open when the link goes away must be ended
+                # rather than left live in the history forever.
+                self._dispatch(self._consume())
+                self._dispatch(
+                    self.tracker.close(seq=self.state.seq, wall_ns=time.time_ns())
+                )
 
-                publish_state(state_dir, state, now)
-        finally:
-            # Every subscription that was actually established is torn down,
-            # including when the other one failed and when a signal cancelled
-            # the wait.
-            for permitted in subscribed:
-                with contextlib.suppress(Exception):
-                    await client.stop_notify(permitted)
+        return time.monotonic() - began
 
-    return time.monotonic() - began
+    async def _pump(self, client: Any) -> None:
+        """The streaming loop: wake on a packet, publish on a transition."""
+        state = self.state
+        last_health = time.monotonic()
+        last_publish = 0.0
+        heartbeat = self.config.collector.heartbeat_seconds
+
+        while not self.stop.is_set():
+            wait = heartbeat
+            if self.deadline is not None:
+                wait = min(wait, max(0.0, self.deadline - time.monotonic()))
+                if wait <= 0:
+                    return
+            self.wake.clear()
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self.wake.wait(), timeout=wait)
+
+            now = time.monotonic()
+            events = self._consume()
+            if events:
+                self._dispatch(events)
+
+            # The OBDLink comes first.  The probe runs subprocesses, so it goes
+            # to a thread: on this loop it could block for up to ten seconds,
+            # which is long enough for BlueZ to drop the subscription.
+            if now - last_health >= self.config.obd.interval_seconds:
+                last_health = now
+                state.obd = await asyncio.to_thread(self.obd_probe)
+                if not state.obd.healthy:
+                    state.status = "obd-blocked"
+                    self._publish(now)
+                    return
+
+            if not getattr(client, "is_connected", True):
+                state.note = "link dropped"
+                return
+
+            # Publish on a transition, or on the heartbeat.  A transition is
+            # the whole point; the heartbeat is what keeps freshness honest
+            # when nothing is happening.
+            if events or (now - last_publish) >= heartbeat:
+                last_publish = now
+                self._publish(now)
+
+
+async def _watchdog(state: CollectorState, stop: asyncio.Event) -> None:
+    """Measure how late this loop's own timer is, and publish the answer.
+
+    The cheapest useful diagnostic in the whole project.  Everything that could
+    starve the BLE notification path -- a synchronous disk commit, a blocking
+    socket, a subprocess -- shows up here as overshoot, and a number in the
+    state document is how a problem that would otherwise present as "the link
+    keeps dropping" becomes a problem with a cause.
+    """
+    while not stop.is_set():
+        began = time.monotonic()
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(
+                stop.wait(), timeout=WATCHDOG_INTERVAL_SECONDS
+            )
+        if stop.is_set():
+            return
+        lag_ms = (time.monotonic() - began - WATCHDOG_INTERVAL_SECONDS) * 1000.0
+        state.loop_lag_ms = max(0.0, lag_ms)
+        state.loop_lag_max_ms = max(state.loop_lag_max_ms, state.loop_lag_ms)
 
 
 async def run(  # noqa: PLR0913 - the injection seams are the point
@@ -560,10 +1120,11 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
     state_dir: str | os.PathLike[str],
     *,
     duration: float | None = None,
-    obd_probe: Callable[[], ObdHealth] = default_obd_probe,
+    obd_probe: Callable[[], ObdHealth] | None = None,
     client_factory: Callable[[str], Any] | None = None,
     rng: Callable[[], float] = random.random,
     install_signal_handlers: bool = True,
+    config: Config | None = None,
 ) -> int:
     """Run the collector until stopped, or until *duration* elapses.
 
@@ -587,8 +1148,21 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
     if duration is not None:
         duration = float(duration)
 
+    settings = config or Config()
     state_dir = Path(state_dir)
-    state = CollectorState(mode="trial" if duration is not None else "continuous")
+    if obd_probe is None:
+        obd_probe = (
+            make_obd_probe(settings.obd.unit, settings.obd.device)
+            if settings.obd.guard else unguarded_obd_probe
+        )
+    if client_factory is None:
+        client_factory = _default_client_factory(settings.collector.adapter)
+
+    state = CollectorState(
+        mode="trial" if duration is not None else "continuous",
+        obd_guarded=settings.obd.guard,
+        adapter=settings.collector.adapter,
+    )
     stop = asyncio.Event()
     deadline = time.monotonic() + duration if duration is not None else None
 
@@ -598,6 +1172,10 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
             with contextlib.suppress(NotImplementedError, RuntimeError):
                 loop.add_signal_handler(signame, stop.set)
 
+    sinks = Sinks(settings)
+    await sinks.start(stop, adapter=settings.collector.adapter)
+    watchdog = asyncio.create_task(_watchdog(state, stop))
+
     attempt = 0
     ever_compatible = False
     try:
@@ -605,33 +1183,34 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
             if deadline is not None and time.monotonic() >= deadline:
                 break
 
-            state.obd = obd_probe()
+            state.obd = await asyncio.to_thread(obd_probe)
+            state.sinks = sinks.status()
             if not state.obd.healthy:
                 # Never open the detector link while the OBDLink is unhealthy.
                 state.connected = False
                 state.compatible = False
                 state.status = "obd-blocked"
-                publish_state(state_dir, state)
+                publish_state(state_dir, state, detail=settings.collector.detail)
                 attempt += 1
                 await _wait(stop, next_backoff(attempt, rng), deadline)
                 continue
 
             state.status = "connecting"
             state.connected = False
-            publish_state(state_dir, state)
+            publish_state(state_dir, state, detail=settings.collector.detail)
 
+            session = _Session(
+                address, state, state_dir, stop, obd_probe, client_factory,
+                settings, sinks, deadline,
+            )
             try:
-                stream = _stream(
-                    address, state, state_dir, stop, obd_probe, client_factory, deadline
-                )
                 if deadline is None:
-                    lasted = await stream
+                    lasted = await session.run()
                 else:
                     remaining = max(0.0, deadline - time.monotonic())
                     if remaining <= 0:
-                        stream.close()
                         break
-                    lasted = await asyncio.wait_for(stream, timeout=remaining)
+                    lasted = await asyncio.wait_for(session.run(), timeout=remaining)
             except asyncio.CancelledError:
                 raise
             except TimeoutError:
@@ -640,7 +1219,9 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
                 # No backend exception text is published: it can contain the
                 # device address.
                 lasted = 0.0
-                state.note = "trial deadline" if deadline is not None else "session timed out"
+                state.note = (
+                    "trial deadline" if deadline is not None else "session timed out"
+                )
             except Exception:  # noqa: BLE001 - a failed session is routine
                 # Deliberately no exception text: it can carry the address, and
                 # this state file is published.
@@ -661,14 +1242,20 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
                 attempt += 1
             state.reconnects += 1
             state.status = "reconnecting"
-            publish_state(state_dir, state)
+            publish_state(state_dir, state, detail=settings.collector.detail)
             await _wait(stop, next_backoff(attempt, rng), deadline)
     finally:
+        stop.set()
+        watchdog.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await watchdog
         state.connected = False
         state.compatible = False
         state.status = "stopped"
         state.note = state.note or "clean shutdown"
-        publish_state(state_dir, state)
+        state.sinks = sinks.status()
+        publish_state(state_dir, state, detail=settings.collector.detail)
+        await sinks.close()
 
     return 0 if ever_compatible else 1
 

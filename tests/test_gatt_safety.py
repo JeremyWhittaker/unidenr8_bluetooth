@@ -89,18 +89,59 @@ def test_refusal_has_no_override_parameter():
     assert list(signature.parameters) == ["command"]
 
 
+def _every_module():
+    """Import every module in the package.
+
+    Enumerated rather than listed.  The previous version of this check named
+    six modules by hand and had already fallen behind the package by four; a
+    control with a hand-maintained list of what it covers is a control that
+    silently stops covering the newest thing, which is always the thing least
+    reviewed.
+    """
+    import importlib
+    import pkgutil
+
+    import uniden_r8
+
+    modules = [uniden_r8]
+    for info in pkgutil.iter_modules(uniden_r8.__path__):
+        modules.append(importlib.import_module(f"uniden_r8.{info.name}"))
+    return modules
+
+
 def test_no_module_in_the_package_exposes_an_allow_writes_switch():
+    """Upstream's write path is behind `allow_writes=True`.  There is no
+    equivalent here, in any module, on any function or method."""
     import inspect
 
-    from uniden_r8 import audit, cli, discovery, evidence, privacy
+    modules = _every_module()
+    assert len(modules) > 6, "enumeration is not finding the whole package"
 
-    for module in (gatt, discovery, cli, privacy, evidence, audit):
-        for name, member in inspect.getmembers(module, inspect.isfunction):
-            if member.__module__ != module.__name__:
+    banned = {"allow_writes", "allow_write", "enable_writes", "unsafe_writes"}
+    for module in modules:
+        members = inspect.getmembers(module, inspect.isfunction)
+        members += [
+            (f"{cls_name}.{name}", method)
+            for cls_name, cls in inspect.getmembers(module, inspect.isclass)
+            if getattr(cls, "__module__", "") == module.__name__
+            for name, method in inspect.getmembers(cls, inspect.isfunction)
+        ]
+        for name, member in members:
+            if getattr(member, "__module__", "") != module.__name__:
                 continue
-            parameters = inspect.signature(member).parameters
-            assert "allow_writes" not in parameters, f"{module.__name__}.{name}"
-            assert "allow_write" not in parameters, f"{module.__name__}.{name}"
+            parameters = set(inspect.signature(member).parameters)
+            offending = parameters & banned
+            assert not offending, f"{module.__name__}.{name}: {offending}"
+
+
+def test_the_allow_writes_check_would_catch_one():
+    """A control that cannot fail proves nothing."""
+    import inspect
+
+    def tempting(allow_writes: bool = False) -> None:  # pragma: no cover
+        pass
+
+    assert "allow_writes" in inspect.signature(tempting).parameters
 
 
 # ---------------------------------------------------- source-level audit

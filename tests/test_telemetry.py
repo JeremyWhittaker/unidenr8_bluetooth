@@ -91,10 +91,36 @@ def test_a_short_packet_does_not_produce_confident_values():
     assert reading.parsed is False
 
 
-def test_telemetry_requires_the_confirmed_seven_field_shape():
+def test_only_the_seven_field_shape_counts_as_parsed():
+    """Seven fields is the only shape this R8 has ever produced.
+
+    A longer packet is still decoded -- a firmware update that appends a field
+    must not blank the voltage on a display -- but it is graded, and `parsed`
+    stays false so the schema-1 document refuses it.
+    """
     reading = telemetry.parse_telemetry(b"12.1&0&W,0,193,C&0&12&D&D&extra")
     assert reading.parsed is False
+    assert reading.shape == "extended-8"
+    assert reading.voltage == 12.1, "decoded, but not blessed"
+
+
+def test_a_short_packet_is_decoded_no_further_than_its_field_count():
+    """With fewer fields there is nothing to line the values up against."""
+    reading = telemetry.parse_telemetry(b"12.1&0&W,0,193,C")
+    assert reading.parsed is False
+    assert reading.shape == "short-3"
     assert reading.voltage is None
+
+
+def test_the_schema_one_document_refuses_an_unconfirmed_shape():
+    """The grade is only useful if something acts on it."""
+    from uniden_r8 import collector
+
+    state = collector.CollectorState()
+    state.record_telemetry(telemetry.parse_telemetry(b"12.1&0&0&0&12&D&D&extra"))
+    document = collector.build_document(state)
+    assert document["telemetry"]["voltage"] is None
+    assert document["telemetry"]["shape_confirmed"] is False
 
 
 def test_an_unknown_alert_band_is_not_reflected_into_public_output():
@@ -454,3 +480,73 @@ def test_the_render_survives_an_empty_window(tmp_path, monkeypatch):
     client = FakeClient(values={}, emit=[])
     session, _ = _run(client, 0.01, tmp_path, monkeypatch)
     assert "No telemetry arrived" in session.render() or session.latest is not None
+
+
+# ------------------------------------------------- the detailed views render
+
+def test_the_detailed_render_survives_an_active_poi_warning():
+    """The regression this was written for.
+
+    `LiveSession._render_detail` reached for POI fields that a later
+    simplification of `PoiWarning` had removed, so `live --full` raised
+    AttributeError the first time a POI warning was actually active -- a path no
+    test exercised because no captured packet has ever had one.
+    """
+    session = telemetry.LiveSession(
+        started_at="2026-09-02T00:00:00Z", seconds=1.0,
+        connected=True, compatible=True, detailed=True,
+    )
+    session.latest = telemetry.parse_telemetry(
+        b"11.8&SPEEDCAM,500,35&N,45,312,C&0&5&D&D"
+    )
+    assert session.latest.poi.active
+    rendered = session.render()
+    assert "POI warning active" in rendered
+    assert "heading N" in rendered
+
+
+def test_every_confidence_key_names_something_actually_published():
+    """A grade attached to a field nobody emits is decoration.
+
+    The map is published verbatim into the schema-2 document so a consumer can
+    join a grade to a field by name; keys that match nothing would make that
+    join silently empty.
+    """
+    reading = telemetry.parse_telemetry(TELEMETRY_PACKET)
+    alert = telemetry.parse_alerts(ALERT_PACKET)[0]
+
+    def paths(document, prefix=""):
+        for key, value in document.items():
+            here = f"{prefix}{key}"
+            yield here
+            if isinstance(value, dict):
+                yield from paths(value, f"{here}.")
+
+    published = set(paths(reading.detailed()))
+    published |= {f"alerts[].{key}" for key in alert.detailed()}
+    published |= {"alerts_empty"}
+
+    unmatched = [
+        key for key in telemetry.FIELD_CONFIDENCE
+        if key not in published and not key.startswith("unknown.upstream_names")
+    ]
+    assert not unmatched, f"graded but never published: {unmatched}"
+
+
+def test_an_unlisted_mute_code_keeps_the_detection_but_not_the_string():
+    """Two rules meet on field 7, and both have to hold.
+
+    Losing a real Ka warning because the mute code was unfamiliar is the worst
+    thing this parser could do -- and putting an arbitrary device string into a
+    published document is the second worst.
+    """
+    alert = telemetry.parse_alerts(b"1,00,KA,3,33,33.7850,R,9&0&0&0")[0]
+    assert alert.band == "KA", "the detection survives an unknown mute code"
+    assert alert.muted is None, "and the mute state is unknown, not false"
+    assert alert.mute_status == "unknown"
+
+    hostile = telemetry.parse_alerts(
+        b"1,00,KA,3,33,33.7850,R,../../etc/passwd&0&0&0"
+    )
+    assert hostile and hostile[0].mute_code is None, "no device string is kept"
+    assert "passwd" not in repr(hostile[0].detailed())

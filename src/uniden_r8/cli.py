@@ -22,9 +22,20 @@ The command surface is deliberately small:
     One bounded connection reading only standard Device Information values.
 ``live``
     One bounded connection reading and subscribing only to telemetry/alerts.
+``collect``
+    The long-running collector: hold the link, publish state, feed the
+    optional history, GNSS, MQTT and local-feed sinks.
+``inspect``
+    One explicitly confirmed read of the settings blocks and the POI database,
+    written only into the private store.  The only command that deliberately
+    touches the detector's saved coordinates.
+``history``
+    Query the local SQLite history.  No radio at all.
+``config``
+    Print the effective configuration, or an example file.  No radio.
 
-Every radio operation is bounded. Nothing here retries forever or runs as a
-service.
+Every radio operation except ``collect`` is bounded.  Nothing here retries
+forever except the collector, which is what it is for.
 """
 
 from __future__ import annotations
@@ -38,6 +49,8 @@ from pathlib import Path
 
 from . import __version__
 from .audit import audit_package
+from .config import ConfigError, example_toml, load_config
+from .config import describe as describe_config
 from .discovery import (
     DEFAULT_SCAN_SECONDS,
     MAX_SCAN_SECONDS,
@@ -93,6 +106,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--store",
         default=DEFAULT_STORE,
         help=f"private evidence directory, 0700 (default: {DEFAULT_STORE})",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="configuration file (default: search ./unidenr8.toml, then "
+             "$XDG_CONFIG_HOME/uniden-r8/config.toml)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -164,19 +184,58 @@ def build_parser() -> argparse.ArgumentParser:
         "--save", metavar="NAME",
         help="also write the sanitized session into the private store under NAME",
     )
+    live_parser.add_argument(
+        "--full", action="store_true",
+        help="also print and emit the full decoded surface, including the "
+             "detector's own heading, speed and altitude (off by default: "
+             "those describe where the vehicle is)",
+    )
 
     collect_parser = sub.add_parser(
         "collect",
         help="background collector: hold the link, publish display state",
     )
     collect_parser.add_argument(
-        "--state-dir", default=DEFAULT_STATE_DIR,
-        help=f"where state.json is written, 0700 (default: {DEFAULT_STATE_DIR})",
+        "--state-dir", default=None,
+        help=f"where state.json is written, 0700 (default: the configured "
+             f"value, else {DEFAULT_STATE_DIR})",
     )
     collect_parser.add_argument(
         "--duration", type=_positive_finite_seconds, default=None,
         help="bounded trial: stop after this many seconds (default: run until "
              "SIGTERM/SIGINT)",
+    )
+
+    inspect_parser = sub.add_parser(
+        "inspect",
+        help="one confirmed read-only dump of settings and POI into the "
+             "private store",
+    )
+    inspect_parser.add_argument(
+        "--confirm", action="store_true",
+        help="required: this reads the POI database, which holds saved camera "
+             "locations and user marks",
+    )
+
+    history_parser = sub.add_parser(
+        "history", help="query the local history database; no radio"
+    )
+    history_parser.add_argument(
+        "what", nargs="?", default="stats",
+        choices=("stats", "events", "encounters", "telemetry"),
+        help="what to show (default: stats)",
+    )
+    history_parser.add_argument("-n", "--limit", type=int, default=20)
+    history_parser.add_argument(
+        "--json", action="store_true", help="emit rows as JSON"
+    )
+
+    config_parser = sub.add_parser(
+        "config", help="print the effective configuration; no radio"
+    )
+    config_parser.add_argument(
+        "--example", action="store_true",
+        help="print a complete commented configuration file instead",
     )
     return parser
 
@@ -466,7 +525,7 @@ def _cmd_identity(store_path: str, seconds: float, address: str | None = None) -
 
 
 def _cmd_live(store_path: str, seconds: float | None, as_json: bool,
-              save: str | None) -> int:
+              save: str | None, full: bool = False) -> int:
     from .pairing import PairingRefused, bonded_detector_address
     from .telemetry import receive
 
@@ -484,7 +543,9 @@ def _cmd_live(store_path: str, seconds: float | None, as_json: bool,
         file=sys.stderr if as_json else sys.stdout,
     )
     try:
-        session = asyncio.run(receive(address, salt, store, seconds))
+        session = asyncio.run(
+            receive(address, salt, store, seconds, detailed=full)
+        )
     except ImportError:
         print("bleak is not installed in this environment.", file=sys.stderr)
         return 2
@@ -493,15 +554,28 @@ def _cmd_live(store_path: str, seconds: float | None, as_json: bool,
         store.write_json(save, session.as_dict())
 
     output = json.dumps(session.as_dict(), indent=2) if as_json else session.render()
-    print(publish(output))
+    if full:
+        # publish() refuses a position, which is exactly right for the default
+        # surface and exactly wrong here: --full is a person asking to see the
+        # position-adjacent fields on their own terminal.  The refusal is
+        # bypassed deliberately, at one call site, with the reason attached.
+        print(output)
+    else:
+        print(publish(output))
     if not session.connected:
         return 1
     return 0 if session.compatible else 1
 
 
-def _cmd_collect(state_dir: str, duration: float | None) -> int:
+def _cmd_collect(state_dir: str | None, duration: float | None,
+                 settings) -> int:
     from .collector import InstanceBusy, SingleInstanceLock, run
     from .pairing import PairingRefused, bonded_detector_address
+
+    # An explicit --state-dir wins over the configuration file, which wins over
+    # the built-in default.  Stated in that order because a person typing a
+    # flag has just made a decision and a file made one earlier.
+    resolved = state_dir or settings.collector.state_dir
 
     try:
         address = bonded_detector_address()
@@ -509,7 +583,7 @@ def _cmd_collect(state_dir: str, duration: float | None) -> int:
         print(publish(str(exc)), file=sys.stderr)
         return 1
 
-    lock = SingleInstanceLock(Path(state_dir) / "collector.lock")
+    lock = SingleInstanceLock(Path(resolved) / "collector.lock")
     try:
         lock.acquire()
     except InstanceBusy as exc:
@@ -517,9 +591,13 @@ def _cmd_collect(state_dir: str, duration: float | None) -> int:
         return 3
 
     mode = f"bounded trial, {duration:g}s" if duration is not None else "continuous"
-    print(f"collector starting ({mode}); state -> {state_dir}/state.json")
+    print(f"collector starting ({mode}); state -> {resolved}/state.json")
+    for note in settings.warnings():
+        print(f"  ! {note}", file=sys.stderr)
     try:
-        return asyncio.run(run(address, state_dir, duration=duration))
+        return asyncio.run(
+            run(address, resolved, duration=duration, config=settings)
+        )
     except ImportError:
         print("bleak is not installed in this environment.", file=sys.stderr)
         return 2
@@ -529,12 +607,149 @@ def _cmd_collect(state_dir: str, duration: float | None) -> int:
         lock.release()
 
 
-def main(argv: list[str] | None = None) -> int:
+def _cmd_inspect(store_path: str, confirmed: bool, settings) -> int:
+    """One deliberate look at settings and POI, into the private store only."""
+    from .inspection import InspectionRefused, inspect
+    from .pairing import PairingRefused, bonded_detector_address
+
+    if not confirmed:
+        print(
+            "inspect reads the detector's settings blocks and its POI "
+            "database.\nPOI holds saved camera locations and user marks -- "
+            "home, work, the roads\nyou drive.  Nothing is decoded and "
+            "nothing leaves the private store, but\nthe bytes are read.  "
+            "Re-run with --confirm.",
+            file=sys.stderr,
+        )
+        return 2
+
+    store = PrivateStore(store_path).ensure()
+    salt = store.salt
+    try:
+        address = bonded_detector_address()
+    except (LookupError, PairingRefused) as exc:
+        print(publish(str(exc)), file=sys.stderr)
+        return 1
+
+    try:
+        result = asyncio.run(
+            inspect(address, salt, store, confirmed=True,
+                    adapter=settings.collector.adapter or None)
+        )
+    except InspectionRefused as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
+    except ImportError:
+        print("bleak is not installed in this environment.", file=sys.stderr)
+        return 2
+
+    print(publish(result.render()))
+    return 0 if result.compatible else 1
+
+
+def _cmd_history(what: str, limit: int, as_json: bool, settings) -> int:
+    """Read the local history.  No radio, no detector, no network."""
+    from .storage import HistoryError, open_history
+
+    try:
+        history = open_history(settings.history_path)
+    except HistoryError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    try:
+        if what == "stats":
+            rows = [history.stats()]
+        elif what == "events":
+            rows = history.events(limit)
+        elif what == "encounters":
+            rows = history.encounters(limit)
+        else:
+            rows = history.telemetry(limit)
+    finally:
+        history.close()
+
+    if as_json:
+        print(publish(json.dumps(rows, indent=2, default=str)))
+        return 0
+    if not rows:
+        print(f"no {what} recorded")
+        return 0
+    print(publish(_render_rows(what, rows)))
+    return 0
+
+
+def _render_rows(what: str, rows: list) -> str:
+    """Format history rows as a table, dropping the columns that are empty.
+
+    Columns that are null in every row are omitted rather than printed as a
+    field of dashes: a history recorded without coordinates should not show an
+    empty latitude column implying one was expected.
+    """
+    if what == "stats":
+        stats = rows[0]
+        lines = [
+            f"history {stats['path']}",
+            f"  schema {stats['schema']}, {stats['size_bytes']:,} bytes",
+        ]
+        lines += [f"  {name:<14} {count:>8,}"
+                  for name, count in stats["counts"].items()]
+        if stats["first_alert_at"]:
+            lines.append(f"  alerts span {stats['first_alert_at']} .. "
+                         f"{stats['last_alert_at']}")
+        return "\n".join(lines)
+
+    columns = [
+        name for name in rows[0]
+        if any(row.get(name) is not None for row in rows)
+        and name not in {"id", "session_id", "wall_ns", "monotonic_ns"}
+    ]
+    widths = {
+        name: max(len(name), *(len(_cell(row.get(name))) for row in rows))
+        for name in columns
+    }
+    header = "  ".join(name.ljust(widths[name]) for name in columns)
+    lines = [header, "-" * len(header)]
+    lines += [
+        "  ".join(_cell(row.get(name)).ljust(widths[name]) for name in columns)
+        for row in rows
+    ]
+    return "\n".join(lines)
+
+
+def _cell(value) -> str:
+    if value is None:
+        return "-"
+    if isinstance(value, float):
+        return f"{value:g}"
+    return str(value)
+
+
+def _cmd_config(settings, example: bool) -> int:
+    print(example_toml() if example else describe_config(settings))
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - one per command
     args = build_parser().parse_args(argv)
+
+    # The two commands that need no configuration do not load one, so a broken
+    # config file cannot stop a reviewer reading the plan or proving the
+    # safety properties -- which are exactly what someone reaches for when
+    # something is broken.
     if args.command == "plan":
         return _cmd_plan()
     if args.command == "selftest":
         return _cmd_selftest(args.store)
+
+    try:
+        settings = load_config(args.config)
+    except ConfigError as exc:
+        print(f"configuration: {exc}", file=sys.stderr)
+        return 2
+
+    if args.command == "config":
+        return _cmd_config(settings, args.example)
     if args.command == "scan":
         return _cmd_scan(args.store, args.seconds, args.json, args.save)
     if args.command == "pair":
@@ -544,9 +759,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "identity":
         return _cmd_identity(args.store, args.seconds)
     if args.command == "live":
-        return _cmd_live(args.store, args.seconds, args.json, args.save)
+        return _cmd_live(args.store, args.seconds, args.json, args.save, args.full)
     if args.command == "collect":
-        return _cmd_collect(args.state_dir, args.duration)
+        return _cmd_collect(args.state_dir, args.duration, settings)
+    if args.command == "inspect":
+        return _cmd_inspect(args.store, args.confirm, settings)
+    if args.command == "history":
+        return _cmd_history(args.what, args.limit, args.json, settings)
     return 2  # pragma: no cover - argparse rejects unknown subcommands first
 
 

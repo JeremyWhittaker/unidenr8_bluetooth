@@ -69,8 +69,14 @@ __all__ = [
     "LIVE_READ_UUIDS",
     "LIVE_NOTIFY_UUIDS",
     "REQUIRED_LIVE_ATTRIBUTES",
+    "INSPECT_READ_UUIDS",
+    "INSPECT_READ_PLAN",
+    "DESCRIPTOR_READ_PLAN",
+    "CHARACTERISTIC_USER_DESCRIPTION_UUID",
+    "SENSITIVE_UUIDS",
     "assert_live_readable",
     "assert_live_notifiable",
+    "assert_inspect_readable",
     "KNOWN_WRITE_COMMANDS",
     "WriteRefused",
     "UnknownCharacteristic",
@@ -371,6 +377,78 @@ REQUIRED_LIVE_ATTRIBUTES: Final[tuple[str, ...]] = (
     TELEMETRY_UUID,
     ALERT_UUID,
 )
+
+
+#: The Bluetooth SIG Characteristic User Description descriptor, 0x2901.
+#: Every vendor characteristic reportedly carries one.  Reading them is the
+#: cheapest possible discovery step -- the device is telling you what it thinks
+#: its own attributes are called -- and it is a plain descriptor *read*, with
+#: nothing of the caller's reaching the application.
+CHARACTERISTIC_USER_DESCRIPTION_UUID: Final[str] = (
+    "00002901-0000-1000-8000-00805f9b34fb"
+)
+
+#: The characteristics the **inspection** command may read, and nothing else.
+#:
+#: These are excluded from the live path on purpose and admitted here on
+#: purpose, and the difference between the two is the whole design.  The
+#: collector runs unattended for hours and has no business reading a database
+#: of saved coordinates; a one-shot command a person ran deliberately, whose
+#: output goes only into the owner-only private store, is a different act.
+#:
+#: What is *not* here matters as much: the command-write characteristic, which
+#: is on the permanent denylist, and the command-response characteristic, which
+#: is pointless without a command this project will not send.
+INSPECT_READ_UUIDS: Final[frozenset[str]] = frozenset(
+    {POI_UUID, SETTINGS_1_UUID, SETTINGS_2_UUID}
+)
+
+#: The order the inspection reads happen in.  Settings first, POI last: if
+#: something goes wrong mid-run, the least sensitive attribute has already been
+#: read and the most sensitive one has not.
+INSPECT_READ_PLAN: Final[tuple[str, ...]] = (
+    SETTINGS_1_UUID,
+    SETTINGS_2_UUID,
+    POI_UUID,
+)
+
+#: Descriptor reads live in their own plan rather than joining
+#: :data:`PROBE_PLAN`.  That plan's contract -- every entry is a
+#: ``("read"|"notify", characteristic)`` pair whose UUID is in
+#: :data:`CATALOGUE` -- is asserted by three separate tests, and widening it to
+#: admit a descriptor would weaken all three to buy nothing.  A descriptor is a
+#: different kind of attribute; it gets a different list.
+DESCRIPTOR_READ_PLAN: Final[tuple[str, ...]] = (
+    TELEMETRY_UUID,
+    ALERT_UUID,
+    POI_UUID,
+    SETTINGS_1_UUID,
+    SETTINGS_2_UUID,
+)
+
+#: Attributes whose *contents* are sensitive even though reading them is not.
+#: POI holds saved camera locations and user marks -- home, work, the roads
+#: Jeremy drives.  Anything read from one of these goes to the private store as
+#: raw bytes and is never summarised into published output.
+SENSITIVE_UUIDS: Final[frozenset[str]] = frozenset({POI_UUID})
+
+
+def assert_inspect_readable(uuid: str) -> str:
+    """Return *uuid* if the inspection command may GATT-read it, else raise.
+
+    A third gate, narrower than the probe's and wider than the live path's.
+    Three gates rather than one flag, because "which operations is *this*
+    command allowed to perform" is a question each command should answer for
+    itself at its own call sites -- a single gate with a mode parameter is a
+    single gate somebody can pass the wrong mode to.
+    """
+    canonical = assert_readable(uuid)
+    if canonical not in INSPECT_READ_UUIDS:
+        raise WriteRefused(
+            f"{describe(canonical).name} is not in the inspection set; "
+            f"inspection reads settings and POI only"
+        )
+    return canonical
 
 
 def assert_live_readable(uuid: str) -> str:

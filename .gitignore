@@ -29,3 +29,17 @@ venv/
 dist/
 build/
 *.egg-info/
+
+# Collector state and local history.  state.json is sanitized, but the
+# schema-2 document beside it carries the detector's heading, speed and
+# altitude, and the history database can carry coordinates when the operator
+# turns that on.  A rough trace of a drive must not be committable, and
+# `git add -A` during a debugging session on the node is the realistic way
+# that would happen.
+.state/
+*.db
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db-wal
+*.db-shm

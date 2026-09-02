@@ -143,12 +143,36 @@ Then, on the node:
 cd "$UNIDEN_ROOT"
 python3 -m venv .venv          # PEP 668 marks the system Python externally
                                # managed; a venv is mandatory, not a style choice
-.venv/bin/pip install -e ".[ble,dev]"
+.venv/bin/pip install -e ".[ble,dev]"        # add ,mqtt only if you have a broker
 ```
 
 `bleak` is an *optional* dependency here. The safety gate, redaction and
-classification import and test without it; the scan, identity and live
-operations load it only when they use the radio.
+classification import and test without it; the scan, identity, live, inspect and
+collect operations load it only when they use the radio. `paho-mqtt` is optional
+in the same way, and the history, the `gpsd` client and the local feed need no
+extra at all — they are standard library.
+
+### Write the configuration file
+
+Nothing so far needs one; the defaults are a complete working configuration. The
+collector is where it starts to matter, because that is where the OBD guard, the
+history and every outward feed are switched on and off.
+
+```bash
+cd "$UNIDEN_ROOT"
+.venv/bin/python -m uniden_r8.cli config --example > unidenr8.toml
+$EDITOR unidenr8.toml
+.venv/bin/python -m uniden_r8.cli config          # what it actually resolved to
+```
+
+The last command prints the effective configuration and any warnings. Read the
+warnings: each one is a legal setting that a person may not have meant. Every key
+is documented in `docs/CONFIGURATION.md`.
+
+**On a node with no OBDLink, set `guard = false` under `[obd]`.** The gate
+defaults to on and expects `hummer-rfcomm.service` and `/dev/rfcomm0`; without
+them the collector will publish `obd-blocked` and refuse to connect, which is
+correct behaviour and a confusing first experience.
 
 ---
 
@@ -299,6 +323,20 @@ Reading it:
 Raw payloads land in `.private/`, `0600`. Nothing printed contains an address,
 and heading, speed and altitude are deliberately absent from the output.
 
+Add `--full` to see them:
+
+```bash
+.venv/bin/python -m uniden_r8.cli live --seconds 30 --full
+```
+
+That prints the detector's own eight-point heading, its speed and altitude, the
+POI warning detail, and every decoded alert field including the raw signal, the
+alert id, the mute code and the receive mode. It is off by default because those
+fields describe where the vehicle is; `docs/SAFETY.md` §3 says where each of them
+may go. `--full` also bypasses the publication gate at one call site, on purpose:
+that gate refuses a position, and `--full` is a person asking to see one on their
+own terminal.
+
 Afterwards, re-run the OBD invariant checks from step 1.
 
 ## Step 6 — the background collector
@@ -374,6 +412,110 @@ OBD side, not this one.
 **`stale: true`** means telemetry stopped arriving more than 10 s ago. A frozen
 reading is worse than a blank one, so the display line says `STALE`.
 
+### Reading the second document
+
+`state-v2.json` sits beside `state.json` in the same owner-only directory and
+carries everything the first one deliberately leaves out.
+
+```bash
+jq '.health, .ingest' "$UNIDEN_ROOT/.state/state-v2.json"
+```
+
+```json
+{"loop_lag_ms": 0.4, "loop_lag_max_ms": 3.1, "loop_lag_alarm": false,
+ "telemetry_interval": {"samples": 118, "median_s": 0.99, "p95_s": 1.02, "max_s": 1.14}}
+{"accepted": 412, "dropped": 0, "gaps": 0, "high_water": 2, "depth": 0,
+ "lost_notifications": 0}
+```
+
+Four numbers are worth learning to read:
+
+* **`ingest.dropped` and `ingest.gaps`** should both be zero. Anything else
+  means the consumer fell behind and notifications were lost; the `Gap` records
+  in `recent_events` name exactly which sequence numbers went.
+* **`health.loop_lag_max_ms`** is how late a quarter-second timer actually fired.
+  Single-digit milliseconds is healthy. Past a second the alarm flag is set, and
+  that means something blocked the event loop for long enough to threaten the
+  BLE subscription itself.
+* **`health.telemetry_interval.p95_s`** against the measured 0.97–1.02 s baseline.
+  A widened tail is the one cheap signal available for radio contention, which
+  the OBD health probe structurally cannot see.
+* **`detector.detector_gps`** carries the heading, speed and altitude that
+  `state.json` omits, and `detector.shape` says whether the packet had the
+  confirmed seven-field shape.
+
+### Looking at what happened
+
+With `enabled = true` under `[history]`:
+
+```bash
+.venv/bin/python -m uniden_r8.cli history                 # counts and span
+.venv/bin/python -m uniden_r8.cli history encounters      # one row per threat
+.venv/bin/python -m uniden_r8.cli history events -n 50    # every transition
+.venv/bin/python -m uniden_r8.cli history --json events | jq
+```
+
+`encounters` is the useful one after a drive: one row per completed threat, with
+its duration, peak strength and peak raw signal. The database is a plain SQLite
+file, so `sqlite3` works on it directly; the schema is in `docs/SCHEMA.md`.
+
+Retention runs once at startup and deletes rows older than `retain_days`
+relative to *the newest row in the database*, not relative to the wall clock —
+the Pi has no battery-backed clock, and a clock that briefly reads a far-future
+date would otherwise delete the whole history.
+
+### Turning on a live display or a broker
+
+Both are off by default and both add sustained radio load. **Do not enable
+either for the first time on a drive.** The gate is a comparison:
+
+1. Run one bounded trial with the feature off, and record `ingest`,
+   `health.telemetry_interval`, and the OBD side's own counters.
+2. Run the same trial with it on.
+3. If the telemetry interval's p95 widens or the OBD side degrades, the feature
+   does not ship. Say so in `docs/EVIDENCE.md` and move on.
+
+```toml
+[feed]
+enabled = true
+bind = "127.0.0.1"      # leave it here; reach it over the node's VPN interface
+port = 8787
+```
+
+Then open `http://localhost:8787/` — or forward that port — for a live view that
+updates the instant an alert transitions, rather than at the e-paper panel's
+five-minute cadence. `/state` returns the current document as JSON and
+`/healthz` returns `ok`, which is enough for an external check.
+
+```toml
+[mqtt]
+enabled = true
+host = "localhost"
+base_topic = "unidenr8"
+home_assistant = true
+```
+
+State is published retained so a dashboard connecting mid-drive sees something;
+alert transitions are published **not** retained, because a broker replaying a
+threat that ended twenty minutes ago is a false alarm. Topics and payloads are
+in `docs/SCHEMA.md`.
+
+### Inspecting settings and POI, once, deliberately
+
+This is the only command that reads the detector's saved coordinates. Run it
+parked, with a reason.
+
+```bash
+.venv/bin/python -m uniden_r8.cli inspect --confirm
+```
+
+It reads settings 1, settings 2 and the POI database, writes the raw bytes into
+`.private/` as `inspect-<timestamp>.json`, and prints lengths, byte histograms
+and candidate record boundaries — no device bytes at all. **Nothing is decoded.**
+`docs/VALIDATION.md` sets out how to turn a pair of snapshots either side of one
+physical menu change into one understood settings byte, and how to approach the
+POI layout safely.
+
 ### Wiring it to the e-paper display
 
 Implemented in the sibling `hummer-obd` display. It reads
@@ -409,10 +551,29 @@ Neither command restarts or edits `hummer-rfcomm.service`.
 
 ## Step 7 — stop
 
-The `live` path runs once and exits. The separately reviewed collector can run
+The `live` and `inspect` paths run once and exit. The collector can run
 continuously, but remains opt-in: the parked five-minute trial proved clean
 teardown and no OBD binding disruption, not throughput during active polling
 or an entire drive.
+
+`Ctrl-C` and `SIGTERM` are handled. The collector unsubscribes, ends every open
+alert track so none is left live in the history forever, releases the link,
+flushes the history writer, says goodbye to the broker, closes the feed, and
+publishes a `stopped` state. The systemd unit allows 30 seconds for all of that.
+
+---
+
+## What is still waiting on hardware
+
+Everything added after the collector — the event path, the history, the `gpsd`
+client, the feed, the broker, the inspection command — is tested against fakes
+and has never met the detector. More importantly, **no real radar detection has
+ever been captured from this unit**, so every active-alert field remains R8w
+evidence.
+
+`docs/VALIDATION.md` is the checklist for changing that. It is written to be
+used standing at the vehicle, and it is the highest-value work available on this
+project.
 
 ---
 

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "uniden-r8-ble"
 version = "0.1.0"
-description = "Read-only Uniden R8 Bluetooth LE listener for the Hummer telemetry node"
+description = "Receive-only Uniden R8 Bluetooth LE integration: live telemetry, lossless radar alert events, local history and feeds"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "Jeremy Whittaker"}]
@@ -15,8 +15,18 @@ authors = [{name = "Jeremy Whittaker"}]
 dependencies = []
 
 [project.optional-dependencies]
+# The radio.  Needed by scan, pair, identity, live, collect and inspect; not by
+# plan, selftest, config or history.
 ble = ["bleak>=0.21,<4"]
+# Publication to an MQTT broker.  Optional because most installations have no
+# broker, and because paho's 2.x callback API is a breaking change from the 1.x
+# that Debian ships -- pinning >=2 and installing from PyPI avoids running the
+# one the distribution happens to carry.
+mqtt = ["paho-mqtt>=2,<3"]
 dev = ["pytest>=8", "ruff>=0.8"]
+# Everything.  The history (SQLite) and the gpsd client (sockets) and the local
+# feed (asyncio) are standard library only and need no extra at all.
+all = ["bleak>=0.21,<4", "paho-mqtt>=2,<3"]
 
 [project.scripts]
 uniden-r8 = "uniden_r8.cli:main"

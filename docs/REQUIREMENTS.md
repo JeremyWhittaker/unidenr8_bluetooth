@@ -1,200 +1,161 @@
-# Requirement checklist
+# Requirement and verification checklist
 
-Parent-review findings from `.foreman/claude-opus-phase2-review.md`, each with
-a status and the evidence for it.
+What was asked for, what was built, and what proves it. Each row names the
+evidence rather than asserting completion.
 
-Status values: **implemented** · **blocked** · **deferred** · **not applicable**
+Status values: **done** · **done, hardware-unvalidated** · **deferred** ·
+**refused** · **not applicable**
+
+`docs/HANDOFF.md` is the shorter version of this document for somebody picking
+the project up. `docs/VALIDATION.md` is the queue of work that would move rows
+from *hardware-unvalidated* to *done*.
 
 ---
 
-## 1. Correct the RF / "cannot transmit" overclaims — **implemented**
+## Part 1 — the expansion build
 
-The earlier drafts said the scan was passive and the package could not
-transmit. Both were wrong. BlueZ scans **actively** by default, so an
-advertisement is answered with a scan request; and connections, GATT Reads and
-notification subscriptions all exchange frames. Subscribing writes a CCCD,
-which is a real protocol descriptor write.
+Requirements from the September 2026 integration research report, which audited
+the project at commit `36aa1bd4` and recommended a phased expansion.
 
-The invariant now stated everywhere:
-
-> **No application-characteristic write path.** Nothing writes to the Uniden
-> command characteristic; no mute, user-mark, settings or other R/Tach command
-> is ever sent. And no OBD/RFCOMM management.
-
-Phase 1's scan is called **bounded advertisement-only discovery** throughout.
-
-| Evidence | Where |
-|---|---|
-| Corrected wording | `README.md`, `docs/SAFETY.md` §2, `docs/RUNBOOK.md`, `docs/EVIDENCE.md`, `.foreman/PAIR_READY.md`, and the `__init__`, `audit`, `discovery`, `cli` docstrings |
-| Regression test | `test_the_docs_do_not_overclaim_radio_silence` — scans docs and source for the banned phrasing, ignoring double-quoted citations of it |
-| Proof the control can fail | `test_the_overclaim_detector_still_catches_a_real_overclaim` |
-| CCCD stated accurately | `docs/SAFETY.md` §2, `audit.py` docstring, `test_start_notify_is_not_treated_as_an_application_write` |
-
-## 2. Fix the identifier-leak enumeration — **implemented**
-
-`git status` reports only *changed* paths, so once the tree was committed and
-clean the scan covered nothing and passed vacuously.
-
-Now `committable_paths()` unions `git ls-files -z` (tracked, whether modified
-or not) with `git ls-files -z --others --exclude-standard` (non-ignored
-untracked), splitting on NUL so a path containing a newline or quote cannot be
-mis-parsed.
-
-| Evidence | Where |
-|---|---|
-| Rewritten enumeration | `tests/test_repo_hygiene.py::committable_paths` |
-| Regression test for the exact bug | `test_the_enumeration_includes_unchanged_tracked_files` — asserts an unchanged tracked file is enumerated and that `git status` omits it |
-| Vacuity guard | `test_the_enumeration_is_not_vacuous`, plus an in-test assertion that the path list is non-empty |
-| NUL safety | `test_the_enumeration_survives_an_awkward_filename`, against a scratch repo |
-
-The parent committed checkpoint `ca60984`; the unchanged-tracked-file test is
-now active and passes rather than taking its bootstrap skip.
-
-## 3. Bounded connected identity probe — **implemented, not run again**
-
-`src/uniden_r8/identity.py` plus the `identity` subcommand.
+### P0 — make the read path lossless
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Select exactly one strong candidate | implemented | `cli._find_one_strong`; `test_exactly_one_strong_candidate_is_selected` |
-| Refuse ambiguity | implemented | `test_two_strong_candidates_are_refused_not_guessed_at` |
-| Never print the raw address | implemented | `test_the_ambiguity_message_carries_no_address`, `test_the_report_never_contains_the_address` |
-| **Never serialize the address** | implemented | The `.private/detector-address.txt` cache was **removed**; the file was deleted from the node. Address now resolves from BlueZ's own bond state via `pairing.bonded_detector_address()` and lives only in process memory. `test_no_module_writes_an_address_to_disk`, `test_the_private_store_holds_no_address_after_a_scan` |
-| Strict connect timeout | implemented | `CONNECT_TIMEOUT_SECONDS` 25 s, `SESSION_CEILING_SECONDS` 60 s; `test_the_session_is_bounded`, `test_a_hung_session_is_cancelled` |
-| Pairing only behind an explicit flag | implemented | `pair --confirm`; `test_pairing_refuses_to_act_without_explicit_confirmation` |
-| Read only 0x2A24/0x2A29/0x2A26/0x2A28 | implemented | `test_only_the_four_device_information_characteristics_are_read` asserts the exact read list against an injected client |
-| Missing service/characteristics are evidence | implemented | `test_a_missing_characteristic_is_evidence_not_a_crash`, `test_a_device_with_no_device_information_service_still_reports` |
-| Scrub all exception/output paths | implemented | `test_an_error_message_is_scrubbed`, `test_a_failure_to_connect_is_reported_not_raised` |
-| Teardown | implemented | `async with`; `test_teardown_happens_even_when_a_read_raises` |
+| Timestamped queue ingestion for both notification kinds | done | `events.Ingest`; `test_events.py` |
+| Publish and record every alert snapshot; derive start/update/end | done | `events.AlertTracker`; `collector._Session._consume`; `test_a_short_alert_produces_a_start_and_an_end` |
+| Track packet counts, parse failures, queue depth, drops, last-packet age, reconnects | done | `build_detail_document` → `counters`, `ingest`, `health`, `link.last_packet_age_s`; `test_the_queue_metrics_reach_the_detailed_document` |
+| Preserve the state file as a compatibility output, written on transitions rather than only on a timer | done | `state.json` is byte-compatible schema 1; the heartbeat is a floor, not the rate; `test_state_json_is_still_schema_one_with_exactly_its_original_keys` |
+| **Acceptance**: a synthetic short alert always produces start and end | done | Proven at 400 ms end to end, and in unit form |
+| **Acceptance**: replayed notifications preserve order with drops visible | done | `events.Gap` with exact sequence numbers; `test_a_dropped_notification_is_visible_as_a_gap` |
 
-**Not re-run against hardware.** It ran once before this review, during the
-pairing window the parent coordinated; those results are in
-`docs/EVIDENCE.md` §6. It has not been run since.
+Two things went further than the requirement, both because the requirement as
+written would have been unsound:
 
-## 4. Bounded receive-only vendor-data phase — **implemented and run**
+- The report asked for a lossless *event* path. What was built makes the
+  **snapshot stream** the lossless layer and the tracks an explicitly derived
+  view, stamped with the matcher's version. A derivation presented as a record
+  makes every future improvement invalidate the data already collected.
+- The report proposed correlating on band, direction and frequency. Direction is
+  geometry, not identity — passing a fixed source walks front → side → rear for
+  one source — so keying on it would manufacture a spurious end and start at the
+  most interesting moment of an encounter. Matching is a cost function instead.
 
-`src/uniden_r8/telemetry.py` plus the `live` subcommand. Released by the parent
-in `live-receive-task.md` and run once against the real detector.
-
-| Requirement | Status | Evidence |
-|---|---|---|
-| Exact service/characteristic compatibility gate before access | implemented | `check_compatibility` against the live client; `test_the_gate_refuses_a_device_without_the_vendor_service`, `..._missing_the_telemetry_characteristic`, `..._checks_the_live_device_not_the_catalogue`. Gate failure reads nothing: asserted. |
-| Only confirmed alert and telemetry characteristics | implemented | `LIVE_READ_UUIDS` / `LIVE_NOTIFY_UUIDS`; `test_only_telemetry_and_alert_are_read`, `..._subscribed` |
-| Never read POI/settings | implemented | `test_poi_and_settings_are_refused_by_the_gate_itself` — refused by `assert_live_readable` even though the probe allowlist admits them |
-| No application-characteristic write, no opt-in escape hatch | implemented | AST audit clean; `test_the_fake_client_has_no_write_method`; no `allow_writes` anywhere |
-| Document that `start_notify` changes CCCD/link state | implemented | `docs/SAFETY.md` "The receive path"; module docstring; README |
-| Raw payloads and identifiers stay private | implemented | `test_raw_payloads_land_in_the_private_store_owner_only`, `..._are_not_in_the_published_output`, `test_the_session_output_carries_no_identifier` |
-| Conservative published fields | implemented | `test_no_published_field_carries_position` — heading/speed/altitude/POI detail absent; `test_raw_payloads_are_not_in_the_published_output` asserts altitude never reaches output |
-| Evidence-graded parsing | implemented | Telemetry's observed seven-field shape is enforced; active-alert values remain upstream evidence. Unknown telemetry/alert packets get separate counters and are not reflected into public output. |
-| Bounded session, deterministic teardown incl. partial failure and timeout | implemented | 5–120 s clamp plus connect/cleanup overhead; `test_a_failed_subscription_does_not_stop_the_other`, `test_timeout_unsubscribes_and_disconnects_after_partial_setup`, and the other teardown/timeout tests |
-| No daemon in the bounded `live` phase | implemented | `live` runs once and exits; the separately reviewed collector/unit is tracked below |
-| Bounded real capture | done | 30 s window, 32 packets; see `docs/EVIDENCE.md` §7 |
-
-**Result: the telemetry payload format is now confirmed on this R8** — 31/31
-packets parsed, 7 fields each, 4-field GPS group, ~1.0 s interval. The **alert**
-format remains unconfirmed: only an all-clear packet was seen.
-
-## 5. Comprehensive DI/fake tests, lint, docs — **implemented** (for phases 1–3)
-
-279 tests locally after parent hardening; 270 passed / 9 skipped on the Pi.
-Ruff is clean across `src` and `tests`, and the Pi selftest passes.
-
-| Area | Test file |
-|---|---|
-| Selection ambiguity, bond resolution, no serialization | `test_selection.py` |
-| Timeouts, teardown, missing DIS, exact read allowlist, scrubbing | `test_identity.py` |
-| Pairing guards: verbs, protected bonds, injection, bond-vs-known set | `test_pairing_guards.py` |
-| AST rejection of application-write APIs | `test_gatt_safety.py` |
-| Bounded discovery windows, advertisement adaptation | `test_discovery.py` |
-| Redaction, salt permissions | `test_privacy.py` |
-| Private store modes, publish gate | `test_evidence_store.py` |
-| Repository hygiene enumeration | `test_repo_hygiene.py` |
-| CLI surface, confirmation gate, pairing postconditions | `test_cli.py` |
-| Receive path: gate, allowlists, teardown, parsing, privacy | `test_telemetry.py` |
-
-Docs updated: `README.md`, `docs/SAFETY.md` (new §1a on the pairing guards),
-`docs/RUNBOOK.md`, `docs/EVIDENCE.md` (§§6–7 observations), and this file.
-
-## 6. Code-only redeploy, Pi tests/selftest, OBD invariants — **implemented**
-
-The live phase used the existing bond for one bounded connection; it did not
-scan or pair. See the final summary artifact for captured before/after
-invariants.
-
----
-
-## Checkpoint corrections (`.foreman/checkpoint-corrections.md`)
-
-| # | Correction | Status |
-|---|---|---|
-| 1 | Characteristic UUIDs confirmed, not just counts | **implemented** — `docs/EVIDENCE.md` §6 gains a per-service UUID table; README, conclusion and open question 4.8 updated. Stated as UUID presence only, not payload format. |
-| 2 | Withdraw the continuous-advertising claim and the `AuthenticationCanceled` cause | **implemented** — 6.7 and 6.9 are now graded *not established*; the R8-vs-R8w difference count drops from three to two. |
-| 3 | README `no subprocess` / "only discovery uses the radio" | **implemented** — architecture and command list corrected; the `bluetoothctl` guard is named. |
-| 4 | SAFETY overclaimed that discovery does not address the detector | **implemented** — now says a scan request may be addressed at link layer, and claims only that no connection is made and no characteristic accessed. |
-| 5 | Node baseline said `bleak` absent | **implemented** — records the observed 3.0.2 in the user-owned venv, with the pre-install state noted. |
-| 6 | Use the official release notes | **implemented** — v1.35 changed the Bluetooth default Off→On and moved the menus; v1.41 explicitly added R/Tach support; v1.43 applies DB 260702. The "Bluetooth arrived after March 2024" inference is **withdrawn**, and the third-party 1.28/1.35 discussion is no longer relied on. |
-| 7 | `ATTOWAVE`/`BTM10` inference; "empty" firmware string; RSSI wording | **implemented** — exact strings marked observed and the module reading marked inference with no primary source; 0x2A26 described as all-`NA` placeholders, not empty; −69 dBm recorded as measured, with the "comfortable" judgement marked inference. |
-| 8 | `bonded_devices` must fail closed on any nonzero return | **implemented** — `pairing.bonded_devices` now raises on any nonzero code including 124-with-output. Regression: `test_any_nonzero_bluetoothctl_return_fails_closed` (5 cases), plus tests that a clean zero and a legitimately empty list still pass. |
-| 9 | Pairing postconditions must fail loudly | **implemented** — the CLI returns 1 and prints `PAIRING POSTCONDITION FAILED` with the remedial command if the device is left trusted or connected, even when the bond succeeded. Four tests. |
-| 10 | Re-run everything, deploy, update statuses and summary | **implemented** — see the final summary artifact. |
-
----
-
-## Background collector (`background-collector-task.md`)
+### P1 — expose the full read-only packet surface
 
 | Requirement | Status | Evidence |
 |---|---|---|
-| Injected read-only OBD health probe; require `hummer-rfcomm` active and `/dev/rfcomm0` present/bound | implemented | `default_obd_probe`; `test_the_probe_only_queries` asserts the exact argv pairs |
-| Check before connecting and periodically while connected | implemented | Checked in `run` before each session and every 15 s in `_stream`; `test_an_unhealthy_obd_prevents_the_link_from_ever_opening` asserts **no client is even constructed**; `test_obd_health_lost_during_a_session_releases_the_link` |
-| On failure: release, publish obd-blocked, back off | implemented | `test_obd_health_lost_during_a_session_releases_the_link` asserts teardown and unsubscribe |
-| Never mutate a unit, RFCOMM, controller, or serial | implemented | `test_the_collector_never_mutates_a_service_or_rfcomm` checks every command vector against a banned-verb list |
-| Reuse the bond in memory; no discovery/pair/trust/connect | implemented | `bonded_detector_address()`; no scan path in the collector |
-| Keep the compatibility gate and conservative parsers | implemented | `test_the_compatibility_gate_refuses_a_wrong_service_parentage`, `test_the_gate_refuses_a_missing_characteristic` — both assert nothing is read |
-| Continuous mode plus hard-bounded `--duration` trial | implemented | Deadline inside `_stream` plus outer session ceiling; `test_trial_mode_is_bounded`, `test_a_healthy_streaming_session_still_honours_the_trial_deadline`, `test_a_hung_gatt_read_cannot_outlive_the_trial_deadline`; invalid/nonfinite durations are refused before link construction |
-| SIGTERM/SIGINT and cancellation unsubscribe, disconnect, publish stopped/degraded | implemented | Signal handlers set a stop event; `finally` publishes; `test_a_stop_event_tears_down_and_publishes_stopped`, `test_no_subscription_at_all_is_degraded_not_a_hang` |
-| Bounded exponential backoff with jitter, reset after a healthy session | implemented | `next_backoff`; `test_backoff_grows_and_is_capped`, `..._is_jittered`, `..._never_returns_zero`, `test_a_healthy_session_resets_the_backoff` |
-| Single-instance lock, released on every exit path | implemented | `SingleInstanceLock` (flock); `test_a_second_instance_is_refused`, `..._released_and_reusable`, `..._owner_only` |
-| One sanitized, schema-versioned state JSON, atomic, 0700/0600 | implemented | `publish_state` via `os.replace`; `test_the_state_file_and_directory_are_owner_only`, `test_the_document_is_schema_versioned`, `test_the_write_is_atomic_and_leaves_no_temporary` |
-| Freshness, health, counters, conservative telemetry, alerts, display line | implemented | `build_document`; `test_counters_are_published`, `test_staleness_is_reported`, `test_the_display_line_is_short_enough_for_the_panel` |
-| Never publish address, token, raw packet, heading/speed/altitude, POI detail, exception text, arbitrary detector strings | implemented | `test_the_document_never_carries_position_or_identifiers`, `test_no_exception_text_reaches_the_state_file`, `test_an_unrecognised_band_is_not_echoed`, `test_an_unrecognised_direction_is_not_echoed` |
-| No continuous raw retention; bounded queues/counters | implemented | `test_no_raw_payload_is_retained`, `test_published_alerts_are_bounded`; the one-shot `live` command keeps its private capture unchanged |
-| Hardened systemd unit template, not installed | implemented | `systemd/unidenr8-collector.service`: `User=jeremy`, venv `ExecStart`, `After=` (not `Wants`/`Requires`) `hummer-rfcomm`, start-limit, `UMask=0077`, empty capabilities, `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only`, one state `ReadWritePaths`; `[Install]` permits only a later explicit enable |
-| CLI suitable for the unit and a trial; `--json` parseable where applicable | implemented | `collect --state-dir --duration`; the state document is JSON by construction |
+| Decode direction, speed, altitude and the raw GPS status | done, hardware-unvalidated | `DetectorGps`; units have no source in this project and are labelled `unknown` |
+| Retain candidate POI detail without treating it as proven | done | `PoiWarning` keeps field 1 verbatim and decodes nothing |
+| Publish all alert fields and every simultaneous slot | done, hardware-unvalidated | `Alert.detailed()`, `AlertSnapshot.slots` |
+| Separate radar frequency from laser gun identifier | done | A three-state union: frequency, gun id, or neither. `MRCD`/`MRCT`/`RT3`/`RT4` get no frequency, because `_float` would turn a code into a plausible number |
+| Keep source-confidence labels for unvalidated fields | done | `FIELD_CONFIDENCE`, published in schema 2; `test_every_confidence_key_names_something_actually_published` |
+| **Acceptance**: captured examples round-trip; malformed packets stay diagnosable | done | `test_telemetry.py`; shape grades `confirmed-7` / `extended-N` / `short-N` |
 
-### One real bug this phase found
+Departures from the report, each with a reason:
 
-`--duration` was checked only *between* sessions, so a trial whose session
-stayed healthy would never stop — the streaming loop had no deadline. Found by a
-test that hung rather than failed. Fixed by threading the deadline into
-`_stream`, with `test_a_healthy_streaming_session_still_honours_the_trial_deadline`
-pinning it.
+- **Fields 3–6 are published as `field_3_raw` … `field_6_raw`**, not under
+  upstream's names. Upstream calls field 5 "wifi status"; Uniden's own product
+  page says the R8 has no Wi-Fi. Publishing it under that name would assert a
+  capability the manufacturer says the product lacks.
+- **An alert slot needs eight fields, not nine.** The report specifies nine, and
+  all three of its own examples carry eight. Requiring nine would reject every
+  known-good packet, including the ones the requirement came from.
+- **An unlisted mute code or an absent frequency no longer discards the
+  detection.** Losing a real Ka warning over field 7 is the worst thing this
+  parser could do.
 
-### The supervised trial — run
+### P2 — history, coordinates, and real-time delivery
 
-Run at Jeremy's direct instruction after the build was accepted: one bounded
-300 s trial with the OBDLink sampled every 5 s. 293 telemetry packets, 0
-unparsed, 0 reconnects, clean self-termination at 303 s, exit 0. Every one of
-68 OBD samples showed the binding `connected` with zero `hci0` errors. Details
-and the two limits of the result in `docs/EVIDENCE.md` §8.
+| Requirement | Status | Evidence |
+|---|---|---|
+| SQLite WAL alert/telemetry tables with configurable retention | done | `storage.py`; `test_storage.py` |
+| `gpsd` TPV/SKY ingestion with explicit `vehicle_gnss` fields | done, hardware-unvalidated | `gnss.py`; `test_gnss.py`. No GNSS receiver has been attached. |
+| MQTT / WebSocket / SSE output; keep the e-paper to health status | done | `mqtt.py`, `feed.py`. SSE rather than WebSocket: it is one-way, it reconnects itself, and it needs no library. |
+| Protect location files; make coordinate retention opt-in | done | `record_coordinates` defaults off; `.state/` and `*.db*` git-ignored; `_secure()` tightens the WAL sidecars; `looks_like_position` gates publication |
+| **Acceptance**: every alert queryable with its nearest valid fix, duration, peak strength | done | `history encounters`; the fix is attached at write time |
+| **Acceptance**: loss of GNSS does not stop radar collection | done | `Sinks` failures are independent; `test_gnss.py` covers a refused connection |
 
-### Not done, deliberately
-* No unit installed, enabled, started or restarted; no `sudo`. The trial was
-  run as a foreground-launched bounded process, not as a service.
-* The worker did not write the e-paper consumer because the sibling was
-  read-only to it. The parent implemented the narrowly admitted sibling slice:
-  a defensive schema/freshness/type/allowlist reader, focused tests and visual
-  QA, without changing the OBD line or refresh interval.
+### P3 — validate on the non-W R8
+
+| Requirement | Status |
+|---|---|
+| Run the capture matrix; promote fields from UPSTREAM to OBSERVED | **deferred — the detector is powered off.** `docs/VALIDATION.md` is the checklist. |
+
+This is the largest outstanding item in the project and the highest-value work
+available. Nothing in P1 or P2 changes the grade of a single protocol fact.
+
+### P4 — inspect settings and POI, read-only
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| Read all vendor characteristics and their 0x2901 descriptors | done, never run against hardware | `inspection.py`, `gatt.DESCRIPTOR_READ_PLAN` |
+| Snapshot settings and POI before and after exactly one physical change | done (tooling) | The procedure is in `docs/VALIDATION.md`; the command produces the snapshot |
+| Version the mapping by exact model/software vector; reject an unknown vector | not applicable yet | There is no mapping. Nothing is decoded, so there is nothing to key. |
+
+The report proposed a POI record parser. **Refused.** Upstream published a
+candidate layout and also recorded that the only POI database it ever read was
+empty; a parser built on that can appear to succeed on bytes nobody has seen,
+and its output would be somebody's home address. The command reports lengths,
+byte histograms and record-boundary candidates instead.
+
+### P5 — narrowly scoped controls
+
+| Requirement | Status |
+|---|---|
+| Subscribe to command responses; test mute/unmute; add an allowlist, audit log, rate limit and readback | **refused for now, deliberately.** |
+
+The report itself places this last, after hardware validation that has not
+happened. Beyond that: upstream's write commands were decompiled from an app and
+have never been sent to hardware on any model, and the target is a live safety
+device in a moving vehicle. This project's answer has been that the capability is
+absent rather than disabled, and an AST audit plus two tests enforce that.
+
+If it is to change, it changes as a decision with a written rationale, a single
+reversible command, a captured response and a readback — not as a feature flag.
+`docs/SAFETY.md` §2, "If a write is ever wanted", sets out the route.
+
+### P6 — deploy in the vehicle
+
+| Requirement | Status |
+|---|---|
+| A moving one-to-two-hour endurance test with active OBD polling | **deferred.** The existing evidence is a parked five-minute trial with the OBD collector idle. |
+| Move the R8 to a dedicated USB adapter if the shared controller is unstable | done (support) | `collector.adapter` pins BlueZ via `bluez={"adapter": …}`; not needed yet |
+| Install the unit with restart backoff, a health check and bounded logs | done (template) | `systemd/unidenr8-collector.service`, not installed by anything here |
+| Document that the Pi owns the detector's single BLE connection while running | done | `README.md`, `docs/RUNBOOK.md` |
 
 ---
 
-## Standing constraints — all honoured
+## Part 2 — cross-cutting requirements
 
-| Constraint | Status |
-|---|---|
-| Do not claim/release the Foreman baton | not applicable — untouched |
-| Do not spawn agents or subagents | honoured — all work done directly |
-| Do not commit or push | worker honoured it; parent committed/pushed the green identity checkpoint and ships the reviewed live checkpoint |
-| Do not pair again | honoured — the existing bond was reused; no pairing performed |
-| Do not scan again | honoured — the detector resolves from BlueZ bond state |
-| No `sudo` | honoured — nothing needed it |
-| Preserve OBD invariants | honoured — rechecked; see final summary |
+| Requirement | Status | Evidence |
+|---|---|---|
+| The project must be replicable on a node that is not Jeremy's | done | The OBD unit, device, state directory, adapter and every sink are configuration; `guard = false` runs it with no OBDLink. `test_the_collector_runs_with_the_obd_guard_disabled` |
+| No dependency may be required that is not needed | done | `bleak` and `paho-mqtt` are extras, both lazily imported; the history, GNSS client and feed are standard library |
+| Nothing slow on the event loop | done | The OBD probe on a thread, SQLite on a thread, MQTT on paho's thread; `health.loop_lag_ms`; `test_the_obd_probe_never_runs_on_the_event_loop` |
+| The schema-1 consumer must keep working | done | `state.json` frozen; a literal-`1` test plus a key-set test |
+| No position in published output | done | `looks_like_position` in `evidence.publish()`; `test_publish_refuses_a_coordinate` |
+| No address in anything committable | done | `test_repo_hygiene.py`, no exception list; the loopback exemption lives in `privacy.py` where it is reviewable |
+| The tests must need no hardware | done | 618 tests, no radio, no broker, no `gpsd`, no network |
+| Documentation sufficient for a stranger to take over | done | `HANDOFF`, `ARCHITECTURE`, `PROTOCOL`, `SCHEMA`, `CONFIGURATION`, `RUNBOOK`, `VALIDATION`, `SAFETY`, `EVIDENCE` |
+
+---
+
+## Part 3 — the earlier phases
+
+Requirements from the original build, retained because they are still the
+controls this project rests on. All were verified before the expansion and all
+still pass.
+
+| Area | Status | Test file |
+|---|---|---|
+| Corrected RF overclaims; "no application-characteristic write path" stated everywhere | done | `test_gatt_safety.py::test_the_docs_do_not_overclaim_radio_silence` |
+| Identifier-leak enumeration covers unchanged tracked files | done | `test_repo_hygiene.py` |
+| Bounded connected identity probe; ambiguity refused; address never serialized | done | `test_identity.py`, `test_selection.py` |
+| Bounded receive-only vendor-data phase; compatibility gate; POI/settings refused by the live gate | done | `test_telemetry.py` |
+| Pairing guards: one binary, verb allowlist, discovered protected bonds, nothing left trusted | done | `test_pairing_guards.py` |
+| Background collector: OBD primacy, single instance, bounded backoff, atomic state, deterministic teardown | done | `test_collector.py` |
+| AST audit of application-write APIs, with a proof it can fail | done | `test_gatt_safety.py` |
+
+The detailed history of those phases, including the two real bugs they found —
+a `--duration` that a healthy session ignored, and a hygiene scan that passed
+vacuously on a clean tree — is in the git history and in `docs/EVIDENCE.md`.
