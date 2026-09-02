@@ -733,52 +733,41 @@ Every item here was verified against the source as it stands. They are recorded
 rather than smoothed over, because a reference that quietly agrees with the
 documentation instead of the code is worse than no reference.
 
-**`collector.stale_after_seconds` is accepted but not consumed.** It is
-type-checked and range-checked at load, and it appears in `uniden-r8 config` and
-in the generated example file, but nothing reads
-`config.collector.stale_after_seconds`. The `stale` flag in both published
-documents is computed against the module constant
-`collector.STALE_AFTER_SECONDS`, fixed at 10.0 seconds. Setting the key changes
-nothing.
+**`collect --state-dir` moves the history with it.** The flag overrides the
+configured `collector.state_dir` by rewriting the setting rather than sitting
+beside it, so a relative `history.path` resolves against the directory you
+named. That matters: used the other way, `--state-dir /tmp/trial` would put the
+state documents in the trial directory while the database kept appending to the
+real one, and a bounded trial would quietly write into production history.
 
-**`collect --state-dir` does not move the history database.** The flag overrides
-where `state.json`, `state-v2.json` and `collector.lock` are written, but
-`Config.history_path` resolves a relative `history.path` against
-`collector.state_dir` from the file. With `--state-dir /tmp/trial` and a
-relative history path, the state documents go to `/tmp/trial` and the database
-stays in the configured directory. Give `history.path` an absolute path if that
-matters.
-
-**`uniden-r8 history --json` refuses to print recorded coordinates.** With
-`gnss.record_coordinates` on and coordinates in the rows, the command exits
-non-zero with an uncaught `PublicationRefused` traceback rather than a message,
-because `evidence.publish()` raises and `_cmd_history` does not catch it. The
-same query without `--json` prints the coordinates as a table: the gate's
-free-text check looks for a comma-separated decimal pair, and the table is
-space-separated. Both behaviours are current; the first is loud in an ugly way
-and the second is quiet in a way worth knowing about.
+**`uniden-r8 history` omits recorded coordinates unless you ask.** The
+publication gate refuses any document containing a position, which is right for
+publishing and wrong for the owner reading their own history on their own
+terminal. So the `lat` and `lon` columns are dropped by default — the rest of
+the row is unaffected — and `--full` includes them and bypasses the gate at that
+one call site, the same shape as `live --full`.
 
 **Warning 4 fires on the flag alone.** `gnss.record_coordinates = true` with
 `gnss.enabled = false` still produces the coordinate warning, even though no
 coordinate can be obtained. Loud in the safe direction, but it means the warning
 is not proof that anything is being recorded.
 
-**Every command except `plan` and `selftest` loads the configuration, including
-`config --example`.** A file with a typo therefore blocks the one command that
-prints a known-good example. Run it from another directory, or with
-`--config` naming a file that does load.
+**Every command except `plan`, `selftest` and `config --example` loads the
+configuration.** Those three are the ones somebody reaches for when something is
+broken, and a file with a typo must not block them — least of all the command
+whose whole job is to print a known-good file.
 
 **`history` reads whatever database is at `history_path`, regardless of
 `history.enabled`.** The flag controls writing, not reading; querying a database
 left over from an earlier configuration works.
 
-**The `gnss_fixes` table is created but never written.** `HistoryWriter` has a
-`record_fix` method and nothing calls it, so `uniden-r8 history` always reports
-`gnss_fixes 0` however `[gnss]` is configured. GNSS data does reach the history:
-`record_alert_event` attaches the nearest fix — mode, speed, course, and, when
-`record_coordinates` is on, latitude and longitude — to each alert row. The
-empty table is a missing wiring, not a privacy control; do not read `0` there as
-evidence that nothing positional was stored.
+**`gnss_fixes` rows are sampled on the telemetry throttle.** They are a record
+of the route, separate from the fix attached to each alert row at write time —
+so `history telemetry` and the alert rows answer "where was that alert", while
+`gnss_fixes` answers "where did the vehicle go". Both respect
+`gnss.record_coordinates`: with it off, the rows carry fix quality, speed and
+course, and no position at all. With `[gnss] enabled = false` the table stays
+empty, because there is nothing to sample.
 
 ---
 

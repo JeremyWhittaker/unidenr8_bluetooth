@@ -396,6 +396,12 @@ class CollectorState:
     """Everything the published documents are built from."""
 
     mode: str = "continuous"
+    #: How old a reading may be before it is reported as stale.  Carried on the
+    #: state rather than read from the module constant so the configured value
+    #: actually reaches `build_document`, which is a pure function of this
+    #: object.  It defaults to the constant, so nothing that constructs a bare
+    #: CollectorState changes behaviour.
+    stale_after_seconds: float = STALE_AFTER_SECONDS
     status: str = "starting"
     started_at: str = field(default_factory=utc_stamp)
     obd: ObdHealth = field(default_factory=lambda: ObdHealth(False))
@@ -538,7 +544,7 @@ def build_document(state: CollectorState, now: float | None = None) -> dict[str,
     way to express "probably" should be told.
     """
     age = state.age_seconds(now)
-    stale = age is not None and age > STALE_AFTER_SECONDS
+    stale = age is not None and age > state.stale_after_seconds
     latest = state.latest
     confirmed = bool(latest and latest.shape_confirmed)
     return {
@@ -583,7 +589,7 @@ def build_detail_document(
     receives unless the operator turns that on.
     """
     age = state.age_seconds(now)
-    stale = age is not None and age > STALE_AFTER_SECONDS
+    stale = age is not None and age > state.stale_after_seconds
     latest = state.latest
     return {
         "schema": DETAIL_SCHEMA_VERSION,
@@ -854,7 +860,7 @@ class _Session:
         self.tracker = AlertTracker()
         self.wake = asyncio.Event()
         self.last_history_telemetry = 0.0
-        self.expected_seq = 0
+        self.last_history_fix = 0.0
 
     # ------------------------------------------------------------ callbacks
 
@@ -934,6 +940,27 @@ class _Session:
 
     def _fix(self) -> Any:
         return self.sinks.gnss.fix if self.sinks.gnss is not None else None
+
+    def _record_history_fix(self, now: float) -> None:
+        """Store a GNSS fix on the same throttle as telemetry.
+
+        Alert rows already carry the fix that was current when they were
+        written, which is what "where did that alert happen" needs.  This is the
+        separate track: a sampled record of the route, so a drive can be
+        reconstructed rather than only its detections.  It respects the same
+        coordinate opt-in, so with `record_coordinates` off it stores fix
+        quality, speed and course and no position at all.
+        """
+        if self.sinks.history is None:
+            return
+        fix = self._fix()
+        if fix is None:
+            return
+        every = self.config.history.telemetry_every_seconds
+        if every and now - self.last_history_fix < every:
+            return
+        self.last_history_fix = now
+        self.sinks.history.record_fix(fix, monotonic_ns=fix.monotonic_ns)
 
     def _dispatch(self, events: list[AlertEvent]) -> None:
         """Send transitions everywhere they go.  Never raises."""
@@ -1069,6 +1096,7 @@ class _Session:
             events = self._consume()
             if events:
                 self._dispatch(events)
+            self._record_history_fix(now)
 
             # The OBDLink comes first.  The probe runs subprocesses, so it goes
             # to a thread: on this loop it could block for up to ten seconds,
@@ -1162,6 +1190,7 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
         mode="trial" if duration is not None else "continuous",
         obd_guarded=settings.obd.guard,
         adapter=settings.collector.adapter,
+        stale_after_seconds=settings.collector.stale_after_seconds,
     )
     stop = asyncio.Event()
     deadline = time.monotonic() + duration if duration is not None else None

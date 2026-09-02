@@ -288,3 +288,99 @@ def test_a_clean_pair_succeeds(monkeypatch, tmp_path, capsys):
     code = _pair_harness(monkeypatch, _Result(), tmp_path)
     assert code == 0
     assert "POSTCONDITION" not in capsys.readouterr().err
+
+
+# ------------------------------------------------- configuration plumbing
+
+def test_config_example_works_even_when_the_config_file_is_broken(capsys, tmp_path):
+    """The one command whose job is to print a known-good file.
+
+    A file with a typo would otherwise block exactly what somebody reaches for
+    when their file has a typo.
+    """
+    broken = tmp_path / "broken.toml"
+    broken.write_text("[not-a-section]\nx = 1\n", encoding="utf-8")
+
+    assert cli.main(["--config", str(broken), "config", "--example"]) == 0
+    assert "[collector]" in capsys.readouterr().out
+    # And the same broken file is still an error for anything that uses it.
+    assert cli.main(["--config", str(broken), "config"]) == 2
+
+
+def test_state_dir_moves_the_history_with_it(tmp_path, monkeypatch):
+    """A trial must not append to production history.
+
+    `--state-dir` overrides where the state documents go; a relative
+    `history.path` resolves against the state directory, so if the override were
+    used alongside the settings instead of folded into them, a bounded trial
+    would quietly write into the configured database.
+    """
+    from uniden_r8 import cli as cli_module
+
+    seen: dict = {}
+
+    async def fake_run(_address, state_dir, **kwargs):
+        seen["state_dir"] = str(state_dir)
+        seen["history_path"] = str(kwargs["config"].history_path)
+        return 0
+
+    monkeypatch.setattr("uniden_r8.pairing.bonded_detector_address", lambda: SAMPLE)
+    monkeypatch.setattr("uniden_r8.collector.run", fake_run)
+
+    configured = tmp_path / "configured"
+    trial = tmp_path / "trial"
+    settings = cli_module.load_config(None)
+    from dataclasses import replace
+
+    settings = replace(
+        settings,
+        collector=replace(settings.collector, state_dir=str(configured)),
+    )
+    assert cli_module._cmd_collect(str(trial), 1.0, settings) == 0
+
+    assert seen["state_dir"] == str(trial)
+    assert seen["history_path"].startswith(str(trial)), (
+        "the history followed the configured directory, not the trial one"
+    )
+
+
+def test_history_omits_recorded_coordinates_unless_asked(tmp_path, capsys):
+    """Omitting a column is a better answer than failing.
+
+    The publication gate refuses a document containing a position, and it is
+    right to — but this is the owner querying their own history on their own
+    terminal, so the default drops the columns and `--full` is the explicit ask.
+    """
+    from uniden_r8 import storage
+
+    path = tmp_path / "history.db"
+    with storage.History(path) as history:
+        session = history.begin_session(
+            started_at="2026-09-02T00:00:00.000Z", wall_ns=1, monotonic_ns=1,
+        )
+        history.connection.execute(
+            "INSERT INTO alert_events (session_id, seq, kind, track_id, at, "
+            "wall_ns, monotonic_ns, band, lat, lon) "
+            "VALUES (?,1,'alert_end',1,'2026-09-02T00:00:01.000Z',2,2,'KA',?,?)",
+            (session, 33.4484, -112.0740),
+        )
+
+    written = tmp_path / "c.toml"
+    written.write_text(
+        f'[history]\nenabled = true\npath = "{path}"\n', encoding="utf-8"
+    )
+
+    assert cli.main(["--config", str(written), "history", "events"]) == 0
+    plain = capsys.readouterr().out
+    assert "33.4484" not in plain
+    assert "lat" not in plain.splitlines()[0].split()
+
+    assert cli.main(["--config", str(written), "history", "events", "--full"]) == 0
+    full = capsys.readouterr().out
+    assert "33.4484" in full
+
+    # And the JSON form must not end in an uncaught refusal either way.
+    assert cli.main(["--config", str(written), "history", "events", "--json"]) == 0
+    assert cli.main(
+        ["--config", str(written), "history", "events", "--json", "--full"]
+    ) == 0

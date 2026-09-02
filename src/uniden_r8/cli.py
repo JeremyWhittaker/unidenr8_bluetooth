@@ -45,6 +45,7 @@ import asyncio
 import json
 import math
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 from . import __version__
@@ -228,6 +229,12 @@ def build_parser() -> argparse.ArgumentParser:
     history_parser.add_argument("-n", "--limit", type=int, default=20)
     history_parser.add_argument(
         "--json", action="store_true", help="emit rows as JSON"
+    )
+    history_parser.add_argument(
+        "--full", action="store_true",
+        help="include recorded coordinates (omitted by default, because the "
+             "publication gate refuses a position and omitting a column is a "
+             "better answer than failing)",
     )
 
     config_parser = sub.add_parser(
@@ -575,7 +582,17 @@ def _cmd_collect(state_dir: str | None, duration: float | None,
     # An explicit --state-dir wins over the configuration file, which wins over
     # the built-in default.  Stated in that order because a person typing a
     # flag has just made a decision and a file made one earlier.
-    resolved = state_dir or settings.collector.state_dir
+    #
+    # The override is folded back into the settings rather than used alongside
+    # them, because a relative `history.path` resolves against
+    # `collector.state_dir`.  Used alongside, `--state-dir /tmp/trial` would put
+    # the state documents in the trial directory and leave the database writing
+    # into the real one -- a trial quietly appending to production history.
+    if state_dir:
+        settings = replace(
+            settings, collector=replace(settings.collector, state_dir=state_dir)
+        )
+    resolved = settings.collector.state_dir
 
     try:
         address = bonded_detector_address()
@@ -647,7 +664,8 @@ def _cmd_inspect(store_path: str, confirmed: bool, settings) -> int:
     return 0 if result.compatible else 1
 
 
-def _cmd_history(what: str, limit: int, as_json: bool, settings) -> int:
+def _cmd_history(what: str, limit: int, as_json: bool, settings,
+                 full: bool = False) -> int:
     """Read the local history.  No radio, no detector, no network."""
     from .storage import HistoryError, open_history
 
@@ -669,14 +687,30 @@ def _cmd_history(what: str, limit: int, as_json: bool, settings) -> int:
     finally:
         history.close()
 
+    if not full:
+        # The publication gate refuses a document containing a position, and it
+        # is right to -- but this is the owner querying their own history on
+        # their own terminal, so the answer is to omit the columns rather than
+        # to fail. `--full` is the explicit ask, the same shape as `live --full`.
+        rows = [
+            {key: value for key, value in row.items() if key not in _POSITION_COLUMNS}
+            for row in rows
+        ]
+
     if as_json:
-        print(publish(json.dumps(rows, indent=2, default=str)))
+        rendered = json.dumps(rows, indent=2, default=str)
+        print(rendered if full else publish(rendered))
         return 0
     if not rows:
         print(f"no {what} recorded")
         return 0
-    print(publish(_render_rows(what, rows)))
+    rendered = _render_rows(what, rows)
+    print(rendered if full else publish(rendered))
     return 0
+
+
+#: History columns that carry a position.  Omitted unless `--full` is given.
+_POSITION_COLUMNS = frozenset({"lat", "lon"})
 
 
 def _render_rows(what: str, rows: list) -> str:
@@ -741,6 +775,12 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - one per comma
         return _cmd_plan()
     if args.command == "selftest":
         return _cmd_selftest(args.store)
+    if args.command == "config" and args.example:
+        # Deliberately before the load.  A file with a typo would otherwise
+        # block the one command whose job is to print a known-good file, which
+        # is exactly what somebody reaches for when their file has a typo.
+        print(example_toml())
+        return 0
 
     try:
         settings = load_config(args.config)
@@ -765,7 +805,7 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - one per comma
     if args.command == "inspect":
         return _cmd_inspect(args.store, args.confirm, settings)
     if args.command == "history":
-        return _cmd_history(args.what, args.limit, args.json, settings)
+        return _cmd_history(args.what, args.limit, args.json, settings, args.full)
     return 2  # pragma: no cover - argparse rejects unknown subcommands first
 
 
