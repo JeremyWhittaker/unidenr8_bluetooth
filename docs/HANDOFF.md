@@ -175,3 +175,10 @@ rationale, a single reversible command, a captured response, and a readback — 
   it. The unit and device path are configuration, not constants.
 - **`gpsd`**, if present, on the loopback port. Optional.
 - **An MQTT broker**, if configured. Optional, and off by default.
+- **`hummer_obdII/docs/RUNBOOK.md`** is the documented route to the Pi, and reading it is correct.
+  Do not, however, execute its host commands on the dev workstation. `nmcli -t -f ACTIVE,SSID,SIGNAL
+  device wifi` and the `status.py` display probes are Pi-targeted; there they hit a real
+  Wi-Fi card and, because Jeremy works over seatless RDP, polkit prompts him for a password every
+  time ("System policy prevents Wi-Fi scans"). Run Pi commands over `ssh "$PI_HOST"`, or use
+  `--rescan no` if you only need the cached SSID list. Tracked in
+  `hummer_obdII/docs/AGENT-TODO-wifi-scan.md`.
