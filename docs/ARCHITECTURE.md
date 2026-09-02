@@ -162,7 +162,8 @@ somewhere else.
 | Work | Where it runs | Why |
 |---|---|---|
 | BLE notifications, reads, subscribe/unsubscribe | the loop | It is the loop's job. |
-| The consumer: parse, track, publish | the loop | Pure CPU on tiny payloads; microseconds. |
+| The consumer: parse, track, build documents | the loop | Pure CPU on tiny payloads; microseconds. |
+| Writing the state documents | `asyncio.to_thread` | Two files, two `chmod` calls and two renames on an SD card. The documents are built on the loop first, so what lands on disk describes the instant the call was made rather than whenever the thread was scheduled. |
 | The OBD health probe | `asyncio.to_thread` | Two subprocesses with 5 s timeouts each. On the loop that is a potential ten-second stall — long enough for BlueZ to drop the subscription. |
 | SQLite writes | a dedicated writer thread | An `fsync` on an SD card can take hundreds of milliseconds. A connection is not portable across threads, so the thread also opens it. |
 | MQTT network I/O | paho's own thread (`loop_start`) | `publish()` then only enqueues. This is why paho was chosen over an async client that would share the loop. |

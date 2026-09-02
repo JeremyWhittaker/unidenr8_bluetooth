@@ -21,7 +21,7 @@ an *idle* OBD link over five minutes. The numbers are in [`EVIDENCE.md`](EVIDENC
 
 **Written, tested against fakes, never run against a detector.** Everything added in this build: the
 event path, the alert tracker, the SQLite history, the `gpsd` client, the MQTT publisher, the local
-feed, the settings/POI inspection command, and the schema-2 document. 617 tests pass with no radio,
+feed, the settings/POI inspection command, and the schema-2 document. 630 tests pass with no radio,
 no broker, no `gpsd` and no network. That proves the code does what it was written to do. It does
 not prove the *protocol* is what upstream says it is.
 

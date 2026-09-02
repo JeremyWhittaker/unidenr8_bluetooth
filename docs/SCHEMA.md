@@ -68,7 +68,7 @@ reason.
 | `state.json` | `<state_dir>/state.json` | `0600` in a `0700` directory | no — `.state/` is git-ignored | 1 | always, by the collector |
 | `state-v2.json` | `<state_dir>/state-v2.json` | `0600` in a `0700` directory | no | 2 | only when `collector.detail = true` (the default) |
 | `collector.lock` | `<state_dir>/collector.lock` | `0600` | no | n/a | held for the life of one collector |
-| History database | `history.path`, relative paths resolving against `<state_dir>`; default `history.db` | `0600` | no | 1 (`storage.SCHEMA_VERSION`) | only when `history.enabled = true` |
+| History database | `history.path`, relative paths resolving against `<state_dir>`; default `history.db` | `0600` | no | 2 (`storage.SCHEMA_VERSION`) | only when `history.enabled = true` |
 | Raw packet captures | `.private/live-raw-<stamp>.json` | `0600` in a `0700` directory | no | n/a | only by the one-shot `live` command |
 
 `<state_dir>` is `collector.state_dir`, default `.state`, overridable per run
@@ -218,9 +218,9 @@ That `C` *means* "connected", and what any other letter means, is not
 established. `null` is the honest answer for an unknown letter and must not be
 collapsed into `false`.
 
-`stale` uses a hard-coded 10-second threshold (`collector.STALE_AFTER_SECONDS`).
-The configuration file accepts `collector.stale_after_seconds` and range-checks
-it, but nothing reads it — see [What the code does not do](#what-the-code-does-not-do).
+`stale` uses `collector.stale_after_seconds` (default 10), carried on
+`CollectorState` and read by both `build_document` and `build_detail_document`.
+The module constant `collector.STALE_AFTER_SECONDS` is only that default.
 
 ### `alerts`
 
@@ -378,6 +378,7 @@ and treat every branch as optional.
 | `link` | object | As schema 1, plus `last_packet_age_s` and `stale`. |
 | `counters` | object | Schema 1's three, plus three more. |
 | `ingest` | object | The queue between the BLE callback and the consumer. |
+| `publish_failures` | integer | Consecutive failures to write the state documents. A full or read-only card degrades this program rather than stopping it, so the failure is counted and published; it returns to zero on the next success. |
 | `health` | object | Event-loop lag and inter-packet timing. |
 | `detector` | object or null | The full decoded telemetry packet. `null` before the first packet. |
 | `vehicle_gnss` | object or null | The external GNSS fix. `null` when GNSS is off, absent, or stale. |
@@ -747,7 +748,7 @@ GNSS enabled and `record_coordinates` off:
     "unknown.field_5_raw": "upstream",
     "unknown.field_6_raw": "upstream",
     "voltage_v": "observed"
-},
+  },
   "counters": {
     "alert_packets": 63,
     "telemetry_packets": 1174,
@@ -840,9 +841,9 @@ GNSS enabled and `record_coordinates` off:
       "track_id": 1
     }
   ],
+  "publish_failures": 0,
   "recent_events": [
     {
-      "algorithm": "cost-greedy-1",
       "alert": {
         "alert_id_raw": "00",
         "band": "KA",
@@ -862,6 +863,7 @@ GNSS enabled and `record_coordinates` off:
         "slot": 0,
         "strength_1_to_8": 5
       },
+      "algorithm": "cost-greedy-1",
       "correlation": "new",
       "kind": "alert_start",
       "material": true,
@@ -1319,7 +1321,7 @@ transactions but cannot corrupt the file. Losing the last second of telemetry on
 a hard power cut is acceptable; a corrupt file that takes the whole history with
 it is not.
 
-There is **no migration path**, on purpose. `storage.SCHEMA_VERSION` is `1`, and
+There is **no migration path**, on purpose. `storage.SCHEMA_VERSION` is `2`, and
 opening a database written under a different version raises `HistoryError`
 telling the operator to move the old file aside rather than mixing rows written
 under different meanings.
@@ -1334,7 +1336,7 @@ touches no radio, or with any SQLite client.
 | `key` | TEXT | PRIMARY KEY. |
 | `value` | TEXT | NOT NULL. |
 
-Holds exactly one row in practice: `('schema', '1')`.
+Holds exactly one row in practice: `('schema', '2')`.
 
 ### `sessions`
 
@@ -1376,6 +1378,8 @@ One row per derived transition. This is the table the project exists to fill.
 | `alert_id_raw` | TEXT | Field 1. `00` in every capture on either model. |
 | `receive_mode` | TEXT | Field 8 verbatim. No reading of it is established. |
 | `correlation` | TEXT | `new`, `matched`, `ambiguous`, `timeout`, `closed`. |
+| `algorithm` | TEXT | The matcher that produced the row, e.g. `cost-greedy-1`. Stored so a history spanning an algorithm change can still be read honestly. |
+| `directions` | TEXT | The bearings walked over the encounter, e.g. `FSR`. **NULL except on `alert_end` rows.** |
 | `material` | INTEGER | 0 or 1. |
 | `duration_s` | REAL | **NULL except on `alert_end` rows.** |
 | `samples` | INTEGER | **NULL except on `alert_end` rows.** |
@@ -1398,8 +1402,44 @@ useful middle configuration: it answers "was there a valid fix when that alert
 fired" and validates the detector's own speed reading against a trusted source
 without building a record of where the vehicle has been.
 
-Two fields present on an event record are **not** columns here: `algorithm` and
-`directions`. See [What the code does not do](#what-the-code-does-not-do).
+### `alert_snapshots`
+
+The lossless layer, and the one place in this project where a raw packet reaches
+the disk. One row per alert notification, written *before* anything is derived
+from it.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | INTEGER | PRIMARY KEY AUTOINCREMENT. |
+| `session_id` | INTEGER | The `sessions` row this belongs to. |
+| `seq` | INTEGER | The sequence number assigned in the BLE callback. Gaps in it are real losses. |
+| `at` | TEXT | Millisecond ISO-8601 UTC. |
+| `wall_ns` | INTEGER | Wall clock at arrival. |
+| `monotonic_ns` | INTEGER | Monotonic clock at arrival. Use this for ordering and duration. |
+| `payload` | TEXT | The notification exactly as it arrived, decoded as UTF-8. |
+| `slot_count` | INTEGER | How many `&`-separated slots the packet had. |
+| `recognised` | INTEGER | 0 if any slot arrived and could not be decoded. |
+| `rejected` | INTEGER | How many slots could not be decoded. |
+
+Index: `alert_snapshots_seq` on `(session_id, seq)`.
+
+**Why a payload column exists here and nowhere else.** Correlating an alert
+across snapshots is inference, and a derivation that is the only record makes
+every future improvement to the matcher worthless — there would be nothing left
+to re-run it against, on a protocol that is still being reverse-engineered.
+Keeping the snapshots is what makes "the snapshots are the record, the tracks
+are a view" true rather than aspirational.
+
+The exclusion of *telemetry* payloads follows the same reasoning in the other
+direction: the telemetry packet packs heading, speed, altitude and POI detail
+into one byte string, so a payload column for it would carry all of that past
+both opt-ins under a name that says nothing about what is inside. An alert
+packet carries band, strength, frequency, direction and mute state, and no
+position of any kind. `history.record_alert_snapshots` (default true) switches
+this table off for anyone who wants it off.
+
+Two fields on an event record that are also columns here since schema 2:
+`algorithm` and `directions`.
 
 ### `telemetry`
 
@@ -1453,14 +1493,18 @@ this project.
 
 Index: `gnss_at` on `(at)`.
 
-**This table is created, indexed, counted and swept, and nothing writes to it.**
-`HistoryWriter.record_fix` exists and no caller invokes it. Expect it to be
-empty. See [What the code does not do](#what-the-code-does-not-do).
+Rows are sampled on the same throttle as telemetry
+(`history.telemetry_every_seconds`), and only while `[gnss] enabled = true`.
+They are a record of the *route*, separate from the fix attached to each alert
+row at write time: the alert rows answer "where was that alert", and this table
+answers "where did the vehicle go". Both respect `gnss.record_coordinates` — with
+it off, the rows carry fix quality, speed and course and no position at all.
 
 ### Retention
 
 `history.retain_days`, default 30. On writer start, rows in `alert_events`,
-`telemetry` and `gnss_fixes` with `wall_ns` older than the cutoff are deleted,
+`alert_snapshots`, `telemetry` and `gnss_fixes` with `wall_ns` older than the
+cutoff are deleted,
 along with `sessions` rows older than the cutoff. Zero disables expiry
 entirely, and `Config.warnings()` says so out loud because it is a decision
 rather than a default.

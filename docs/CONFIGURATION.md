@@ -151,7 +151,7 @@ file: `Config.source` (above) and `Config.history_path` (§3.3).
 | `detail` | bool | `true` | — | Also write the schema-2 document `state-v2.json` beside the schema-1 one. |
 | `heartbeat_seconds` | float | `5.0` | 0.5–300 | Floor for rewriting state when nothing has changed. Transitions publish immediately regardless. |
 | `queue_size` | int | `256` | 8–100000 | Depth of the ingest queue between the BLE notification callback and the consumer. |
-| `stale_after_seconds` | float | `10.0` | 1.0–3600 | **Accepted and range-checked, but not consumed.** See §7. |
+| `stale_after_seconds` | float | `10.0` | 1.0–3600.0 | How old a reading may be before both documents report it stale. Carried on `CollectorState` and read by `build_document` and `build_detail_document`; the module constant `collector.STALE_AFTER_SECONDS` is only this default. |
 
 **`adapter` is the documented remedy for radio contention.** Left unset, bleak
 asks BlueZ for its default adapter, which is the first powered one — an order
@@ -214,6 +214,7 @@ streaming loop wakes, so its real granularity is bounded below by
 | `retain_days` | int | `30` | 0–3650 | Rows older than this are deleted. `0` disables expiry entirely. |
 | `telemetry_every_seconds` | float | `10.0` | 0.0–3600 | Minimum spacing between stored telemetry rows. `0` stores every packet. |
 | `record_detector_motion` | bool | `false` | — | Store the detector's own heading, speed and altitude in the `telemetry` table. Off means those three columns are written `NULL`. |
+| `record_alert_snapshots` | bool | `true` | — | Store each alert notification verbatim in the `alert_snapshots` table. On by default, unlike the two opt-ins above, because an alert packet carries no position — and because it is what makes the derived alert tracks re-derivable by a better matcher later. |
 
 `Config.history_path` is the resolved answer, and `storage.HistoryWriter` is the
 only thing that writes it: one private connection on its own thread, fed by a
@@ -359,7 +360,7 @@ collector writes two state documents and a lock file, all `0600` inside a
 |---|---|---|---|
 | `<state_dir>/state.json` | always | Schema 1: freshness, health, counters, voltage, GPS-lock boolean, POI-warning boolean, recognised alerts, a short display line | The owning account |
 | `<state_dir>/state-v2.json` | `collector.detail` (**on by default**) | Schema 2: all of the above plus the detector's own heading, speed and altitude, per-field confidence grades, queue and loop metrics, open tracks, recent events, and the `vehicle_gnss` branch | The owning account |
-| `<state_dir>/history.db` | `history.enabled` | Sessions, every alert transition with the nearest GNSS fix attached, throttled telemetry | The owning account |
+| `<state_dir>/history.db` | `history.enabled` | Sessions, every alert transition with the nearest GNSS fix attached, each raw alert notification verbatim (`alert_snapshots`), throttled telemetry, sampled GNSS fixes | The owning account |
 | MQTT topics | `mqtt.enabled` | Schema 1, or schema 2 when `mqtt.detail` | The broker, and everything subscribed to it |
 | `http://<bind>:<port>/` and `/events` | `feed.enabled` | Schema 1, or schema 2 when `feed.detail` | **Anything that can reach that address. No authentication.** |
 | Terminal output | any CLI command | Guarded by `evidence.publish()`, except `config`, `collect`'s own startup lines, and `live --full` | Whoever is at the terminal |
