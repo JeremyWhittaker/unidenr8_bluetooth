@@ -1,296 +1,199 @@
-# Uniden R8 → Linux: a receive-only Bluetooth LE integration
+# uniden-r8-ble
 
-Connect a Bluetooth-capable [Uniden R8](https://www.uniden.info/download/index.cfm?s=r8) radar
-detector to a Raspberry Pi or any other BlueZ Linux host, and get its live telemetry and its radar
-alerts out as structured data: a JSON state file, a searchable local history, an MQTT feed, and a
-live web dashboard.
+**Get live radar-detector data out of a Uniden R8 over Bluetooth LE, on Linux.**
 
-It uses [Bleak](https://github.com/hbldh/bleak) and BlueZ. It has **no write path to the
-detector** — no mute command, no settings change, no user mark — and it is designed to share one
-Bluetooth controller with a vehicle's OBD-II adapter without disturbing it.
+Voltage, GPS fix, heading and altitude at 1 Hz. Radar alerts as `start` / `update` / `end` events
+with duration and peak strength. A local SQLite history you can query. MQTT with Home Assistant
+discovery. A live web dashboard. And **no way to write anything to the detector** — not a disabled
+path, an absent one.
 
-> [!IMPORTANT]
-> **Live telemetry is verified on real hardware. Active radar alerts are not.**
-> Every field of an *active* alert — band, strength, frequency, direction, mute state — is decoded
-> from a protocol documented on a different model (the R8w). The only alert packet this project has
-> ever seen from a real non-W R8 is *all-clear*. Treat any alert it reports as unvalidated until a
-> real detection has been captured and checked. [`docs/VALIDATION.md`](docs/VALIDATION.md) is the
-> queue of hardware tests waiting to change that.
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![Tests](https://img.shields.io/badge/tests-640-brightgreen.svg)](tests/)
+[![No write path](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
+
+![The bundled dashboard: voltage, detector GPS, link status and packet counts across the top; a live
+Ka alert at eight bars; an event log with each threat's duration](docs/img/dashboard.png)
 
 ---
 
-## What it does
+## Why this exists
 
-- **Streams live detector telemetry** — battery voltage, GPS fix state, and the detector's own
-  eight-point heading, speed and altitude — at about one packet per second.
-- **Turns radar alerts into events.** Alert notifications are full snapshots, so the project derives
-  `alert_start`, `alert_update` and `alert_end` transitions from them, with duration, peak strength
-  and peak raw signal. An alert that begins and ends inside a second is recorded, not lost.
-- **Keeps a local history** in SQLite: every transition, throttled telemetry, and optional GNSS
-  fixes, queryable from the command line.
-- **Publishes** to a JSON state file, an MQTT broker (with Home Assistant discovery), and a
-  self-contained live web dashboard on the local machine.
-- **Fuses external coordinates** from `gpsd`, kept rigorously separate from anything the detector
-  said, because the detector does not put latitude or longitude on the wire.
-- **Reads the detector's identity, settings blocks and POI database** on request, into an
-  owner-only private store, for reverse-engineering work.
-- **Protects the vehicle's OBD link.** On a shared controller it checks the RFCOMM binding before
-  connecting and while connected, and lets go of the detector rather than compete.
+Uniden does not publish its Bluetooth API. Their R/Tach app talks to the detector, and until
+recently the only way to learn how was to decompile it.
 
-It does **not** do: detector control of any kind, firmware updates, raw RF or IQ data,
-dBm-calibrated signal strength, or latitude and longitude from the detector itself. Those last three
-are not limitations of this code — no public evidence shows the BLE interface offers them.
+This project is a **working integration plus an evidence-graded protocol reference**. Every claim
+about the wire format carries a grade saying where it came from — observed on real hardware, seen on
+a different model, or decompiled from an app and never tested. That distinction is not academic:
+about half of what is "known" about this protocol has never been confirmed against any detector, and
+software that treats a guess as a fact will eventually tell a driver there is no threat when there
+is one.
 
-## Capability matrix
+So the parser is deliberately conservative, the unknown fields are carried through raw instead of
+being given invented meanings, and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) tells you exactly which is
+which.
 
-| Capability | Status | Notes |
-|---|---|---|
-| BLE discovery and pairing | **Verified** | Bounded scan, sanitized output; guarded `bluetoothctl` bond, left untrusted and disconnected. |
-| Model, firmware and database version | **Verified** | Standard Device Information reads. No vendor command. |
-| Live telemetry stream | **Verified** | ~1.0 s cadence; 508 of 508 packets parsed across four hardware runs, the most recent on this build. |
-| Voltage | **Verified** | Published as a number. |
-| GPS fix state | **Verified** | Tri-state: locked, no fix, unknown. |
-| Detector heading, speed, altitude | **Decoded; units unvalidated** | Read on real hardware: the heading is a compass point, the speed reads 0 while parked, and the altitude's magnitude fits feet rather than metres. The units still need a moving capture. |
-| Latitude and longitude from the detector | **Not available — now measured, not assumed** | The GPS sub-group's first field reads a compass point on this R8, so it is not a coordinate pair. A tripwire in the parser fires if that ever changes. Use `gpsd`; the schema keeps the two sources apart. |
-| Coordinates from an external GNSS receiver | **Implemented; opt-in** | `gpsd` TPV/SKY, with fix quality and error estimates. Off by default. |
-| Clear / no-alert state | **Verified** | `0&0&0&0` on this R8 — four slots, all empty. |
-| Band, strength, frequency, direction, mute | **Implemented; field validation pending** | Decoded from the R8w protocol. No real detection captured on this unit yet. |
-| Laser gun identification | **Implemented; never seen** | The 0–19 table is decompiled from the app and unverified on any hardware. |
-| Multiple simultaneous threats | **Implemented** | Every slot is preserved; the tracker follows each independently. |
-| Alert start / update / end events | **Implemented** | With duration, peak strength, and an explicit ambiguity flag when correlation was close. |
-| Alert history and search | **Implemented** | SQLite WAL, configurable retention, `uniden-r8 history`. |
-| MQTT / Home Assistant | **Implemented; opt-in** | Retained state, non-retained alerts, discovery documents. |
-| Live web dashboard | **Implemented; opt-in** | Standard library only; loopback by default. |
-| Settings and POI inspection | **Implemented; read-only, confirmed** | Bytes go to the private store. Nothing is decoded — see below. |
-| Detector control (mute, marks, settings) | **Intentionally absent** | Not disabled: absent. There is no code path, and a test proves it. |
-| Firmware update over BLE | **Not available** | The non-W R8 updates over USB with Uniden's own tool. |
-| OBD coexistence | **Partially verified** | A parked five-minute trial disturbed nothing. A drive under active OBD polling is still outstanding. |
+## What you get
 
-## How it fits together
+```console
+$ uniden-r8 live --seconds 30
 
-```mermaid
-flowchart LR
-    R8[Uniden R8] -->|BLE / GATT notify| INGEST[ingest queue<br/>seq + two clocks]
-    INGEST --> PARSE[decoders]
-    PARSE --> TRACK[alert tracker<br/>start / update / end]
-    TRACK --> STATE[state.json + state-v2.json]
-    TRACK --> DB[(SQLite history)]
-    TRACK --> MQTT[MQTT broker]
-    TRACK --> FEED[HTTP + SSE dashboard]
-    GPSD[gpsd] -.->|coordinates, opt-in| TRACK
-    OBD[OBDLink MX+] -->|Bluetooth Classic| RFCOMM[/dev/rfcomm0]
-    COLLECTOR[collector] -. read-only health queries .-> RFCOMM
-```
+packets: 29 telemetry, 0 alert
 
-The R8 and the OBDLink share one Bluetooth controller but remain separate transports: the R8 is
-BLE/GATT, the OBDLink is Bluetooth Classic SPP bound to `/dev/rfcomm0`. Nothing here opens, releases
-or reconfigures that device node.
-
-## Documentation
-
-| Document | What is in it |
-|---|---|
-| [`docs/HANDOFF.md`](docs/HANDOFF.md) | **Start here if you are picking this up.** Current state, what is proven, what is not, and where to work next. |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | Module map, data flow, threading model, and the reasoning behind each. |
-| [`docs/PROTOCOL.md`](docs/PROTOCOL.md) | The reverse-engineered wire format, field by field, with evidence grades. |
-| [`docs/SCHEMA.md`](docs/SCHEMA.md) | The consumer contract: both state documents, the event records, MQTT topics, the SQLite schema. |
-| [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md) | Every configuration key, with worked examples. |
-| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Operating procedure, from firmware check to service installation. |
-| [`docs/VALIDATION.md`](docs/VALIDATION.md) | The hardware test matrix: what is still waiting on a powered-on detector. |
-| [`docs/SAFETY.md`](docs/SAFETY.md) | The safety and privacy boundary, and what enforces each part of it. |
-| [`docs/EVIDENCE.md`](docs/EVIDENCE.md) | Every factual claim with its source and grade. Nothing here is asserted from memory. |
-| [`docs/REQUIREMENTS.md`](docs/REQUIREMENTS.md) | Implementation and verification checklist. |
-
----
-
-## Quick start
-
-### 1. The detector, first
-
-If the firmware predates Bluetooth support, no amount of Linux work will help.
-
-On the R8: press **MENU**, then **+** until **S/W version / DSP Version / GPS Version** appears, and
-**MENU** to display it. Check that **BT/WiFi** exists and is **On**, and that **BT Pairing** appears.
-
-Uniden added R/Tach support to the R8 in firmware **1.41**. This project was validated on **1.43**
-with GPS database **20260702**. If the Bluetooth menu is missing, update over USB with the **Uniden R
-Series Tool** from the [official R8 download page](https://www.uniden.info/download/index.cfm?s=r8)
-before debugging anything on the Linux side.
-
-### 2. The host
-
-Any Debian-based BlueZ system, including Raspberry Pi OS:
-
-```bash
-sudo apt update
-sudo apt install -y bluetooth bluez rfkill python3 python3-venv python3-pip git jq
-sudo rfkill unblock bluetooth
-sudo systemctl enable --now bluetooth
-```
-
-Those are host-setup commands. The application itself runs as an ordinary user and never invokes
-`sudo`.
-
-```bash
-git clone https://github.com/JeremyWhittaker/unidenr8_bluetooth.git
-cd unidenr8_bluetooth
-
-python3 -m venv .venv
-.venv/bin/pip install -e ".[ble,dev]"          # add ,mqtt if you want a broker
-```
-
-Python 3.11 or newer. On modern Debian and Raspberry Pi OS the system Python is marked externally
-managed, so the virtual environment is mandatory rather than a preference.
-
-### 3. Prove the safety controls before touching the radio
-
-```bash
-.venv/bin/uniden-r8 plan        # what the project is permitted to do
-.venv/bin/uniden-r8 selftest    # prove it, on this machine
-```
-
-`selftest` must end with `All read-only properties hold.` It checks the UUID gates, refuses every
-known R/Tach command, parses the package's own AST for any characteristic-writing Bleak call,
-verifies the private store's permissions, and checks the catalogue for self-consistency. Neither
-command needs Bluetooth. **If `selftest` fails, stop.**
-
-### 4. Pair
-
-The detector accepts one BLE client at a time. Turn Bluetooth off on any phone that normally
-connects to it, then put the detector into **MENU → BT Pairing → MENU** and immediately run:
-
-```bash
-.venv/bin/uniden-r8 pair --confirm --seconds 25 --then-read
-```
-
-Pairing is the only operation here that deliberately changes persistent BlueZ state, so `--confirm`
-is mandatory. It refuses an ambiguous candidate, protects every pre-existing bond — including the
-OBDLink's — from being targeted, and fails loudly unless the detector ends up paired, **untrusted**
-and **disconnected**. If the detector is already bonded, skip straight to:
-
-```bash
-.venv/bin/uniden-r8 identity
-```
-
-### 5. Look at live data
-
-```bash
-.venv/bin/uniden-r8 live --seconds 30
-```
-
-```text
-packets: 30 telemetry, 0 alert
-
-  13.6 V     GPS locked
+  13.4 V     GPS locked
 
 alerts: 0
   clear
 ```
 
-Add `--full` to also print the detector's own heading, speed and altitude, and every decoded alert
-field. That is off by default because those fields describe where the vehicle is; see
-[`docs/SAFETY.md`](docs/SAFETY.md) §3. Add `--json` for machine-readable output, or
-`--save NAME.json` to keep the sanitized session in the private store. The window is clamped to
-5–120 seconds and the link is always torn down.
+```console
+$ uniden-r8 history encounters
 
-### 6. Run the collector
-
-```bash
-.venv/bin/uniden-r8 config --example > unidenr8.toml   # edit it
-.venv/bin/uniden-r8 config                             # check what it resolved to
-.venv/bin/uniden-r8 collect --duration 300             # a watched, bounded trial
-jq . .state/state.json
-jq .health,.ingest .state/state-v2.json
+kind       at                        band  direction  duration_s  max_strength  max_raw_signal
+alert_end  2026-09-02T22:41:07.412Z  KA    front      12.480      8             88
+alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             71
 ```
 
-> [!WARNING]
-> The OBD guard is **on by default** and expects `hummer-rfcomm.service` and `/dev/rfcomm0`. On a
-> node with no OBDLink, set `guard = false` under `[obd]` in the configuration file, or the
-> collector will publish `obd-blocked` and refuse to connect — correctly.
+| Capability | Status |
+|---|---|
+| Discovery, pairing, identity, live telemetry | **Verified on hardware** — 508/508 packets parsed across four runs |
+| Voltage, GPS fix state | **Verified** |
+| Detector heading, speed, altitude | **Decoded**; units still need a moving capture |
+| Latitude/longitude from the detector | **Not available** — it does not send any. [Measured, not assumed.](docs/EVIDENCE.md) Use `gpsd`. |
+| Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
+| Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
+| SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
+| Settings / POI inspection | **Read-only, and only on an explicit `--confirm`** |
+| Detector control — mute, marks, settings, firmware | **Absent by design** |
 
-The collector resolves the detector from its existing BlueZ bond without scanning, checks the OBD
-link before connecting and periodically while connected, reconnects with bounded jittered backoff,
-refuses to start a second instance, and writes two documents atomically:
+## Quick start
 
-- **`state.json`** — schema 1, unchanged and byte-compatible with the existing e-paper consumer.
-- **`state-v2.json`** — schema 2: the full decoded surface, per-field confidence grades, queue and
-  loop-health metrics, open alert tracks, recent events, and the external GNSS branch.
-
-Both are `0600` in a `0700` directory, and both are git-ignored.
-
-### 7. Ask what happened
+Any BlueZ Linux host. A Raspberry Pi is the intended target; a laptop works fine.
 
 ```bash
-.venv/bin/uniden-r8 history                 # counts and the span covered
-.venv/bin/uniden-r8 history encounters      # one row per completed threat
-.venv/bin/uniden-r8 history events -n 50    # every transition
+sudo apt install -y bluetooth bluez python3-venv
+git clone https://github.com/JeremyWhittaker/unidenr8_bluetooth.git
+cd unidenr8_bluetooth
+python3 -m venv .venv && .venv/bin/pip install -e ".[ble]"
+
+.venv/bin/uniden-r8 selftest      # prove the read-only controls; needs no radio
 ```
 
-History is off by default; turn it on with `enabled = true` under `[history]`.
-
-## Command reference
-
-| Command | Radio | Persistent change | Purpose |
-|---|---|---|---|
-| `plan` | none | no | Print the permitted operations and the refusal list. |
-| `selftest` | none | creates/validates the private store | Prove the receive-only controls. |
-| `config` | none | no | Show the effective configuration, or emit an example file. |
-| `history` | none | no | Query the local history database. |
-| `scan` | bounded discovery | no | Find an advertising R-series detector, sanitized. |
-| `pair` | discovery + bond | **yes** | Create the bond, after explicit confirmation. |
-| `identity` | one connection | no | Read the standard Device Information values. |
-| `live` | one connection | no | Bounded read and subscribe of telemetry and alerts. |
-| `inspect` | one connection | no | **Confirmed** read of settings and POI, into the private store. |
-| `collect` | continuous | writes local state only | Hold the link and publish everything. |
-
-Run `uniden-r8 COMMAND --help` for options.
-
-## Tested baseline
-
-- A non-W Uniden R8, firmware **1.43**, software revision `R8/143/113/126/107/20260702/999/999/113`,
-  Device Information `BTM10` / `ATTOWAVE`.
-- A Raspberry Pi Zero 2 W: Debian 13, kernel 6.18, Python 3.13, BlueZ 5.82, bleak 3.0.2, 415 MiB RAM.
-- An OBDLink MX+ already bound to `/dev/rfcomm0` by a separate `hummer-rfcomm.service`.
-
-The GATT catalogue originated with [AegisX86/UnidenR8wlink](https://github.com/AegisX86/UnidenR8wlink)
-and was confirmed UUID-by-UUID on the real R8. Other models and firmware should be treated as
-unverified until their identity, attribute table and payloads have been observed —
-[`docs/EVIDENCE.md`](docs/EVIDENCE.md) keeps those apart on purpose.
-
-## Safety and privacy in one paragraph
-
-There is **no application-characteristic write path**. Not a disabled one — an absent one. Nothing
-writes to the Uniden command characteristic; no mute, mute-memory, user-mark, red-light-camera-delete
-or settings command is ever sent; and nothing here manages the OBD link or `/dev/rfcomm0`. That is
-proved by an AST audit of the package's own source, which runs in `selftest` and in the test suite,
-and which has a companion test proving it can still fail. This is a radio, so it does transmit:
-BlueZ scans actively, connecting and reading exchange frames, and subscribing writes a standard
-CCCD descriptor. None of that carries an application command to the detector, which is the
-distinction that actually protects it. Bluetooth addresses become salted tokens, coordinates are
-refused by the publication gate, raw captures stay in the git-ignored `0700` private store, and the
-documents that carry position-adjacent data are `0600` and git-ignored. The full boundary, and what
-enforces each part of it, is in [`docs/SAFETY.md`](docs/SAFETY.md).
-
-## Development
+Put the detector into **MENU → BT Pairing**, turn Bluetooth off on any phone that normally connects
+to it, then:
 
 ```bash
+.venv/bin/uniden-r8 pair --confirm --then-read   # once
+.venv/bin/uniden-r8 live --seconds 30            # look at it
+```
+
+For the long-running collector, the history and the dashboard, see
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md). If your host has no OBD-II adapter — most don't — set
+`guard = false` under `[obd]` in the config first, or the collector will refuse to run and be right
+to.
+
+> [!IMPORTANT]
+> **Live telemetry is verified on real hardware. Active radar alerts are not.**
+> Every field of an *active* alert is decoded from a protocol documented on an **R8w**, a different
+> product. The only alert packet this project has ever seen from a real non-W R8 is all-clear
+> (`0&0&0&0`). Treat any alert it reports as unvalidated. This is the single biggest gap, and
+> [it is the easiest one to help with](#contributing).
+
+## How it works
+
+```mermaid
+flowchart LR
+    R8[Uniden R8] -->|BLE notify| INGEST[ingest queue<br/>sequence + two clocks]
+    INGEST --> PARSE[decoders]
+    PARSE --> TRACK[alert tracker<br/>start / update / end]
+    TRACK --> STATE[state.json<br/>state-v2.json]
+    TRACK --> DB[(SQLite history)]
+    TRACK --> MQTT[MQTT broker]
+    TRACK --> FEED[HTTP + SSE dashboard]
+    GPSD[gpsd] -.->|coordinates, opt-in| TRACK
+```
+
+Three design decisions are worth knowing before you read the code.
+
+**Notifications are events, not samples.** An earlier version updated a variable in the BLE callback
+and published on a timer, so an alert that began and cleared between two publications reached
+nobody. Now the callback stamps two clocks, takes a sequence number and enqueues; a consumer derives
+the transitions. A gap in the sequence is a *recorded* gap, not a silent one.
+
+**Track identity is inference, and it says so.** Correlating an alert across snapshots is a guess —
+the protocol's alert-id field reads `00` in every published capture. So the raw snapshots are the
+record, the tracks are a derived view stamped with the matcher's version, and a close call is
+flagged `ambiguous`. Direction is *geometry*, not identity: passing a fixed source walks front →
+side → rear for one source, and an early matcher that keyed on it manufactured a fake end-and-start
+at the most interesting moment of every encounter.
+
+**Nothing slow runs on the event loop.** The same loop carries the BLE subscription, and on BlueZ a
+client that stops draining its D-Bus socket is *disconnected*, not merely delayed. The OBD probe,
+the SQLite writer and the state writes all run on threads, and a watchdog publishes the loop's own
+lag so you can tell when that stops being true. On a Pi Zero 2 W it peaks around 2.6 ms.
+
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the rest.
+
+## Documentation
+
+| | |
+|---|---|
+| [**HANDOFF**](docs/HANDOFF.md) | Start here if you are picking this up. What is proven, what is not, where to work. |
+| [**PROTOCOL**](docs/PROTOCOL.md) | The wire format, field by field, with an evidence grade on every claim. |
+| [**ARCHITECTURE**](docs/ARCHITECTURE.md) | Module map, data flow, threading model, and why each is shaped that way. |
+| [**SCHEMA**](docs/SCHEMA.md) | The consumer contract: both state documents, event records, MQTT topics, SQLite tables. |
+| [**CONFIGURATION**](docs/CONFIGURATION.md) | Every key, with three worked configurations. |
+| [**RUNBOOK**](docs/RUNBOOK.md) | Operating procedure, firmware check to service install. |
+| [**VALIDATION**](docs/VALIDATION.md) | The hardware test matrix — what is still waiting on a powered-on detector. |
+| [**SAFETY**](docs/SAFETY.md) | The safety and privacy boundary, and what enforces each part. |
+| [**EVIDENCE**](docs/EVIDENCE.md) | Every factual claim with its source and grade. Nothing asserted from memory. |
+
+## Safety and privacy
+
+**There is no application-characteristic write path.** Nothing writes to the Uniden command
+characteristic; no mute, mute-memory, user-mark, camera-delete or settings command is ever sent.
+That is proved by an AST audit of the package's own source, which runs in `selftest` and in CI, and
+which has a companion test proving it can still fail.
+
+This is a radio, so it does transmit: BlueZ scans actively, connecting and reading exchange frames,
+and subscribing writes a standard CCCD descriptor. None of that carries an application command to
+the detector, which is the distinction that actually protects it.
+
+Bluetooth addresses become salted tokens. Coordinates are refused by the publication gate. Raw
+captures stay in a git-ignored `0700` store, and the documents carrying the detector's own heading,
+speed and altitude are `0600` and git-ignored too. A repository test scans every committable file
+for an address-shaped literal, with no exception list.
+
+If you run this alongside a vehicle's OBD-II adapter on a shared Bluetooth controller, the collector
+checks that link before connecting and while connected, and lets go of the detector rather than
+compete with it.
+
+## Contributing
+
+**The most valuable thing you can send is a capture from your own detector.**
+
+Most of what is documented about *active* alerts comes from a single R8w. If you have an R4, R8, R9
+or any of the "w" variants and you see a real alert, a bug report with the decoded packet and what
+your detector's screen said will upgrade a whole row of the protocol table from inherited to
+observed. There is an [issue template](.github/ISSUE_TEMPLATE/hardware-observation.yml) for exactly
+that — it will also remind you to strip anything that is not protocol.
+
+Code contributions are welcome too. Read [`docs/HANDOFF.md`](docs/HANDOFF.md) first: it lists the
+invariants that must not break and why. The tests need no hardware, no broker, no `gpsd` and no
+network — every external dependency has an injection seam.
+
+```bash
+.venv/bin/pip install -e ".[ble,dev]"
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
-.venv/bin/uniden-r8 selftest
 ```
 
-The suite needs no radio, no broker, no `gpsd` and no network: every external dependency has an
-injection seam and every one of them is exercised with a fake. It covers fail-closed pairing guards,
-the read-only gates, privacy and repository hygiene, payload parsing against adversarial input,
-alert correlation, queue overflow and gap visibility, collector deadlines and teardown, the OBD
-invariants, both published schemas, and an AST audit that must detect any future write path.
-
-## Credits and disclaimer
+## Credits
 
 Protocol groundwork came from [AegisX86/UnidenR8wlink](https://github.com/AegisX86/UnidenR8wlink)
-(MIT), by Aigis (P.R_Aigis). This project treats those findings as evidence about an *R8w*,
-independently verifies what applies to an *R8*, and does not copy the upstream source.
+(MIT), by Aigis. This project treats those findings as evidence about an **R8w**, independently
+verifies what applies to an **R8**, and does not copy the upstream source.
 
-Not affiliated with or endorsed by Uniden. This is diagnostic software and not a substitute for the
-detector's own display or audible warnings. Do not operate a phone, a Pi or a dashboard while
-driving.
+MIT licensed. Not affiliated with or endorsed by Uniden. This is diagnostic software and not a
+substitute for the detector's own display or audible warnings — and nothing here is worth looking at
+while you are driving.

@@ -1,0 +1,73 @@
+name: Hardware observation
+description: "Report what a real detector did — the most valuable contribution to this project"
+labels: ["hardware-evidence"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This project grades every protocol claim by evidence, and most claims
+        about ACTIVE radar alerts come from one R8w rather than from an R8. A
+        capture from your unit is what upgrades them.
+
+        Please do **not** paste raw captures that could contain saved
+        coordinates (the POI database), and please redact any Bluetooth
+        addresses before posting.
+
+  - type: input
+    id: model
+    attributes:
+      label: Detector model
+      placeholder: "R8, R8w, R4, R4w, R9..."
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Software revision string (0x2A28)
+      description: >-
+        From `uniden-r8 identity`. Looks like
+        R8/143/113/126/107/20260702/999/999/113
+    validations:
+      required: true
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What did you observe?
+      options:
+        - "An active radar alert (band/strength/frequency)"
+        - "Telemetry field meaning"
+        - "A settings or POI byte layout"
+        - "Something that contradicts the documented protocol"
+        - "Other"
+    validations:
+      required: true
+
+  - type: textarea
+    id: packet
+    attributes:
+      label: The packet, if you have one
+      description: >-
+        The decoded UTF-8 text, e.g. `1,00,KA,3,33,33.7850,R,1&0&0&0`. Redact
+        anything that is not protocol.
+      render: text
+    validations:
+      required: false
+
+  - type: textarea
+    id: detail
+    attributes:
+      label: What you saw, and what the detector's own display said
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Confirmation
+      options:
+        - label: >-
+            I have removed any Bluetooth address, coordinate, or POI record
+            from what I am posting.
+          required: true
