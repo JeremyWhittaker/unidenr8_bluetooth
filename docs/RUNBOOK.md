@@ -55,9 +55,10 @@ Official route, from Uniden support article 153000192832. The R8 updates over
 **USB** — it has no Wi-Fi and no over-the-air update; those are R8w features.
 
 1. Go to <https://www.uniden.info/download/index.cfm?s=r8>.
-2. Download the current **Uniden R Series Tool** (v2.25 Setup for Windows as
-   of 2026-05-19; a Mac build, v2.22_MAC, also exists) and the current
-   **Firmware Update** (V1.43, 2026-07-10) and **Database Update**.
+2. Download the newest **Uniden R Series Tool**, **Firmware Update**, and
+   **Database Update** offered for the R8. This project was validated with R8
+   firmware 1.43 and database 20260702; treat those as a tested baseline, not
+   as a promise that no newer release exists.
 3. On Windows, install `CP210x_Windows_Drivers` if the tool does not see the
    detector.
 4. Run the setup wizard, accept the prompts.
@@ -67,10 +68,9 @@ Official route, from Uniden support article 153000192832. The R8 updates over
    stays dark throughout — that port is data only, and a dark screen is not a
    failure.
 
-Community reporting (Vortex Radar, rdforum — *not* an official statement) says
-R8 firmware 1.28 does not work properly with R/Tach and 1.35 does. Uniden
-publishes no minimum. Treat 1.35 as a floor to clear, not a specification, and
-prefer the current release.
+Uniden's firmware 1.41 release notes explicitly say that R/Tach support was
+added to the R8. Treat 1.41 as the documented minimum for this integration and
+prefer the newest compatible release offered by Uniden.
 
 ---
 
@@ -143,7 +143,7 @@ Then, on the node:
 cd "$UNIDEN_ROOT"
 python3 -m venv .venv          # PEP 668 marks the system Python externally
                                # managed; a venv is mandatory, not a style choice
-.venv/bin/pip install bleak pytest
+.venv/bin/pip install -e ".[ble,dev]"
 ```
 
 `bleak` is an *optional* dependency here. The safety gate, redaction and
@@ -229,11 +229,37 @@ Whatever the result, record it as what was seen. An empty scan is a finding.
 
 Re-run the OBD invariant checks from step 1. They must be identical.
 
+## Step 4b — first-time pairing and identity
+
+Skip the pairing command if this node already has an R8 bond. Otherwise, keep
+the detector in **BT Pairing** mode and leave Bluetooth disabled on any phone
+that normally connects to it, then run:
+
+```bash
+cd "$UNIDEN_ROOT"
+.venv/bin/python -m uniden_r8.cli pair --confirm --seconds 25 --then-read
+```
+
+Pairing is the only operation in this project that deliberately changes
+persistent BlueZ state, so `--confirm` is mandatory. The command refuses an
+ambiguous candidate, protects every pre-existing bond from being targeted,
+and fails unless the detector finishes paired, untrusted, and disconnected.
+`--then-read` immediately performs the standard Device Information reads so
+the model and software revision are recorded without sending a vendor command.
+
+For an existing bond, read identity without pairing again:
+
+```bash
+.venv/bin/python -m uniden_r8.cli identity --seconds 20
+```
+
+Re-run the OBD invariant checks from step 1 after pairing or identity.
+
 ---
 
 ## Step 5 — pull live data
 
-Only once the detector is bonded (see the evidence ledger; it already is).
+Only once the detector is bonded through step 4b:
 
 ```bash
 cd "$UNIDEN_ROOT"

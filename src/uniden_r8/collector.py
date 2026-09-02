@@ -432,7 +432,7 @@ def _default_client(address: str):
     return BleakClient(address, timeout=CONNECT_TIMEOUT_SECONDS)
 
 
-async def _stream(  # noqa: PLR0913 - every parameter is an injection seam
+async def _stream(  # noqa: PLR0913, PLR0917 - every parameter is an injection seam
     address: str,
     state: CollectorState,
     state_dir: Path,
