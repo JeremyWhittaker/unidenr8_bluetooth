@@ -221,9 +221,9 @@ the session.
 
 ### 3.2 The seven fields
 
-`telemetry.TELEMETRY_FIELDS` names them in wire order. Note that the tuple
-still carries upstream's names (`wifi_status`, `brightness_status`) while the
-parsed record does not; §3.6 explains why the record uses neutral names.
+`telemetry.TELEMETRY_FIELDS` names them in wire order, using the same neutral
+names the parsed record uses; `telemetry.UPSTREAM_FIELD_NAMES` records what
+upstream calls each of them. §3.6 explains why the two differ.
 
 | # | Published as | Upstream's name | Format | Grade (meaning) | How this project handles it |
 |---|---|---|---|---|---|

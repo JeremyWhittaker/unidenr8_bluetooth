@@ -128,12 +128,20 @@ INDEX_HTML: Final[str] = """<!doctype html>
 const $=(id)=>document.getElementById(id);
 const bars=(n)=>n?"\\u2588".repeat(n)+"\\u00b7".repeat(8-n):"";
 function paint(d){
-  const t=d.telemetry||{},c=d.collector||{};
-  $("v").textContent=t.voltage!=null?t.voltage.toFixed(1)+" V":"\\u2014";
-  const dg=d.detector_gps||{};
-  $("g").textContent=t.gps_locked?(dg.direction_8||"fix"):(t.gps_locked===false?"no fix":"\\u2014");
+  // Reads either document. Schema 1 puts voltage under `telemetry`; schema 2
+  // puts it under `detector` with a different spelling, and its staleness
+  // moved to `link`. Normalising here means one page serves both rather than
+  // going blank the moment somebody sets feed.detail.
+  const c=d.collector||{}, det=d.detector||null, link=d.link||{};
+  const t=d.telemetry||{};
+  const volts = det ? det.voltage_v : t.voltage;
+  const dg = det ? (det.detector_gps||{}) : {};
+  const locked = det ? dg.locked : t.gps_locked;
+  const stale = det ? link.stale : t.stale;
+  $("v").textContent=volts!=null?volts.toFixed(1)+" V":"\\u2014";
+  $("g").textContent=locked?(dg.direction_8||"fix"):(locked===false?"no fix":"\\u2014");
   $("s").textContent=c.status||"\\u2014";
-  $("s").className=t.stale?"stale":"";
+  $("s").className=stale?"stale":"";
   const n=d.counters||{};
   $("p").textContent=(n.telemetry_packets||0)+"/"+(n.alert_packets||0);
   const box=$("alerts"); box.innerHTML="";
@@ -239,8 +247,13 @@ class StateFeed:
         self._clients.clear()
         if self._server is not None:
             self._server.close()
-            with contextlib.suppress(Exception):
-                await self._server.wait_closed()
+            # Bounded.  From Python 3.12 `wait_closed()` also waits for every
+            # connection handler to finish, and an SSE handler blocked on a
+            # viewer that has stopped reading would hold shutdown open until
+            # systemd's stop timeout killed the process with the detector's
+            # link still up.
+            with contextlib.suppress(TimeoutError, Exception):
+                await asyncio.wait_for(self._server.wait_closed(), timeout=2.0)
             self._server = None
 
     def status(self) -> dict[str, Any]:

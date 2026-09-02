@@ -709,8 +709,17 @@ def _cmd_history(what: str, limit: int, as_json: bool, settings,
     return 0
 
 
-#: History columns that carry a position.  Omitted unless `--full` is given.
-_POSITION_COLUMNS = frozenset({"lat", "lon"})
+#: History columns that describe where the vehicle was or how it was moving.
+#: Omitted unless `--full` is given.
+#:
+#: The detector's own heading, speed and altitude belong here as much as a
+#: coordinate does: a printed column of them across a drive is a rough trace of
+#: it, which is the whole reason recording them is opt-in in the first place.
+#: Leaving them out of this set would have made `history telemetry` the one
+#: command that printed them with no gate at all.
+_POSITION_COLUMNS = frozenset(
+    {"lat", "lon", "direction_8", "speed_mph", "altitude_ft"}
+)
 
 
 def _render_rows(what: str, rows: list) -> str:

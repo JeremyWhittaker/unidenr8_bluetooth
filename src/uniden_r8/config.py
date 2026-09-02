@@ -142,6 +142,12 @@ class HistoryConfig:
     #: are position-adjacent -- a log of them is a rough trace of a drive -- so
     #: recording them is opt-in even though decoding them is not.
     record_detector_motion: bool = False
+    #: Store each alert notification exactly as it arrived.  On by default,
+    #: unlike the two above, because an alert packet carries no position -- and
+    #: because it is what makes the derived alert tracks re-derivable.  A
+    #: better matcher written later needs something to run against, and this
+    #: protocol is still being reverse-engineered.
+    record_alert_snapshots: bool = True
 
 
 @dataclass(frozen=True)

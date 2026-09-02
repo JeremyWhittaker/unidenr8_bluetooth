@@ -162,6 +162,18 @@ HEALTHY_SESSION_SECONDS: Final[float] = 30.0
 #: Connect timeout for one attempt.
 CONNECT_TIMEOUT_SECONDS: Final[float] = 25.0
 
+#: Ceiling on each individual GATT read and subscribe.  bleak's own timeout
+#: covers connecting and not these, and in continuous mode there is no outer
+#: deadline: one call that never returns would hold the link and the vehicle's
+#: radio indefinitely, with the state file frozen on "connecting".
+SETUP_TIMEOUT_SECONDS: Final[float] = 20.0
+
+#: How long a streaming session may go without a single packet before it is
+#: treated as dead and torn down for a retry.  The detector sends telemetry at
+#: about 1 Hz, so a minute of silence on a link BlueZ still calls connected is
+#: a link that is not going to recover on its own.
+SILENCE_TIMEOUT_SECONDS: Final[float] = 60.0
+
 #: At most this many alerts are published.  The detector tracks a handful; an
 #: unbounded list from a malformed packet would be a memory bug on this node.
 MAX_PUBLISHED_ALERTS: Final[int] = 8
@@ -315,7 +327,12 @@ class SingleInstanceLock:
     """
 
     def __init__(self, path: str | os.PathLike[str]) -> None:
-        self.path = Path(path)
+        # Resolved, because the lock's whole job is to be the *same* lock for
+        # two processes that mean the same directory.  A relative path taken
+        # from two different working directories is two different files, and
+        # two collectors would then both hold the detector -- the exact
+        # situation this class exists to make impossible.
+        self.path = Path(path).expanduser().resolve()
         self._handle = None
 
     def acquire(self) -> SingleInstanceLock:
@@ -410,6 +427,10 @@ class CollectorState:
     connected: bool = False
     compatible: bool = False
     reconnects: int = 0
+    #: Consecutive failures to write the state documents.  A full or read-only
+    #: card must degrade this program, not stop it, so the failure is counted
+    #: and published rather than raised.
+    publish_failures: int = 0
     telemetry_packets: int = 0
     alert_packets: int = 0
     unparsed_telemetry: int = 0
@@ -450,6 +471,22 @@ class CollectorState:
     def record_alerts(self, alerts: list[Alert]) -> None:
         self.alert_packets += 1
         self.alerts = alerts[:MAX_PUBLISHED_ALERTS]
+
+    def clear_alerts(self) -> None:
+        """Forget what was being detected, and what was being tracked.
+
+        Called when the link goes away.  Without it the last snapshot stays in
+        every published document forever: a detector switched off mid-alert
+        would leave a Ka warning on the display and in the feed indefinitely,
+        which is the most dangerous possible failure for this particular
+        program -- a stale threat reads exactly like a live one.
+
+        The open-track list goes with it.  It is a copy taken at the last
+        publish, so clearing only the alerts would leave the documents
+        disagreeing with themselves: nothing detected, one threat open.
+        """
+        self.alerts = []
+        self.open_tracks = []
 
 
 def _safe_band(band: str) -> str:
@@ -623,6 +660,7 @@ def build_detail_document(
             "gaps": state.gaps,
             "lost_notifications": state.lost_notifications,
         },
+        "publish_failures": state.publish_failures,
         "health": {
             "loop_lag_ms": round(state.loop_lag_ms, 1),
             "loop_lag_max_ms": round(state.loop_lag_max_ms, 1),
@@ -656,6 +694,64 @@ def _write_atomic(target: Path, payload: str) -> None:
     os.replace(temporary, target)
 
 
+async def publish_state_async(
+    state_dir: Path,
+    state: CollectorState,
+    now: float | None = None,
+    *,
+    detail: bool = False,
+) -> None:
+    """Build the documents here, write them on a thread.
+
+    Serialising is microseconds of CPU; writing is two files, two ``chmod``
+    calls and two renames on an SD card, and that is not something to do on the
+    loop holding the BLE subscription.  The documents are built first, so what
+    lands on disk describes the instant the call was made rather than whenever
+    the thread got scheduled.
+
+    Failures are swallowed and counted.  A card that has filled up or gone
+    read-only must cost the state file, never the radar data: the collector's
+    job is to keep reading the detector.
+    """
+    payloads: list[tuple[str, str]] = []
+    if detail:
+        payloads.append((
+            "state-v2.json",
+            json.dumps(build_detail_document(state, now), indent=2, sort_keys=True)
+            + "\n",
+        ))
+    payloads.append((
+        "state.json",
+        json.dumps(build_document(state, now), indent=2, sort_keys=True) + "\n",
+    ))
+    try:
+        await asyncio.to_thread(_write_documents, Path(state_dir), payloads)
+        state.publish_failures = 0
+    except Exception:  # noqa: BLE001 - a full card degrades, it does not stop us
+        state.publish_failures += 1
+
+
+def _write_documents(state_dir: Path, payloads: list[tuple[str, str]]) -> None:
+    """The blocking half of :func:`publish_state_async`.  Runs on a thread."""
+    _ensure_state_dir(state_dir)
+    for name, payload in payloads:
+        _write_atomic(state_dir / name, payload)
+
+
+def _ensure_state_dir(state_dir: Path) -> None:
+    """Create the directory ``0700``, and tighten it only if it is loose.
+
+    An unconditional ``chmod`` on every publish would silently undo a
+    deliberate ``0750`` an operator had set for a display running as another
+    account -- once per heartbeat, with no way to notice.  Tightening a
+    directory that is group- or world-accessible is still right; leaving one
+    the owner has narrowed differently alone is also right.
+    """
+    state_dir.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
+    if state_dir.stat().st_mode & 0o077:
+        os.chmod(state_dir, DIR_MODE)
+
+
 def publish_state(
     state_dir: Path,
     state: CollectorState,
@@ -672,8 +768,7 @@ def publish_state(
     being contradicted.
     """
     state_dir = Path(state_dir)
-    state_dir.mkdir(mode=DIR_MODE, parents=True, exist_ok=True)
-    os.chmod(state_dir, DIR_MODE)
+    _ensure_state_dir(state_dir)
 
     if detail:
         _write_atomic(
@@ -738,8 +833,12 @@ class Sinks:
                 retain_days=cfg.history.retain_days,
                 record_motion=cfg.history.record_detector_motion,
                 record_coordinates=cfg.gnss.record_coordinates,
+                record_alert_snapshots=cfg.history.record_alert_snapshots,
             )
-            self.history.start(
+            # Opening waits on the writer thread, which is waiting on the
+            # card.  A slow or failing open must not hold the loop either.
+            await asyncio.to_thread(
+                self.history.start,
                 started_at=iso_from_wall_ns(wall_ns), wall_ns=wall_ns,
                 monotonic_ns=monotonic_ns, adapter=adapter,
             )
@@ -764,7 +863,10 @@ class Sinks:
                 base_topic=cfg.mqtt.base_topic, detail=cfg.mqtt.detail,
                 tls=cfg.mqtt.tls, home_assistant=cfg.mqtt.home_assistant,
             )
-            self.mqtt.start()
+            # `connect()` is a blocking TCP connect with a DNS lookup in front
+            # of it.  An unreachable broker would hold this loop for the
+            # resolver's timeout before the detector's link was ever opened.
+            await asyncio.to_thread(self.mqtt.start)
 
         if cfg.feed.enabled:
             from .feed import StateFeed  # noqa: PLC0415 - optional path
@@ -785,15 +887,39 @@ class Sinks:
             with contextlib.suppress(Exception):
                 self.mqtt.stop()
         if self.history is not None:
+            # `stop()` joins the writer thread, which may be mid-commit on an
+            # SD card.  On a thread, so a slow flush costs shutdown time and
+            # not the loop that is still tearing the BLE link down.
             with contextlib.suppress(Exception):
-                self.history.stop()
+                await asyncio.to_thread(self.history.stop)
 
-    def status(self) -> dict[str, Any]:
-        return {
+    #: Status keys that name a host or a path.  They are configuration, which
+    #: the operator can already read, and they are the one part of the status
+    #: block that would travel: publishing a broker's address *to* that broker,
+    #: and to every viewer of the feed, discloses the shape of somebody's
+    #: network for no benefit.
+    _LOCATING_KEYS: Final[frozenset[str]] = frozenset({"host", "port", "path", "bind"})
+
+    def status(self, *, locating: bool = True) -> dict[str, Any]:
+        """Per-sink health.  With *locating* false, hosts and paths are omitted.
+
+        The full form goes into the owner-only state documents; the reduced one
+        is what reaches a broker or a viewer.
+        """
+        raw = {
             "history": self.history.status() if self.history else {"enabled": False},
             "gnss": self.gnss.status() if self.gnss else {"enabled": False},
             "mqtt": self.mqtt.status() if self.mqtt else {"enabled": False},
             "feed": self.feed.status() if self.feed else {"enabled": False},
+        }
+        if locating:
+            return raw
+        return {
+            name: {
+                key: value for key, value in status.items()
+                if key not in self._LOCATING_KEYS
+            }
+            for name, status in raw.items()
         }
 
 
@@ -906,6 +1032,11 @@ class _Session:
             return []
 
         snapshot = parse_alert_snapshot(note.payload)
+        if self.sinks.history is not None:
+            # Before anything is derived from it.  The snapshot is the record;
+            # the tracks below are a view of it that a later matcher may
+            # disagree with.
+            self.sinks.history.record_alert_snapshot(snapshot, note)
         self.state.record_alerts(snapshot.alerts)
         if not snapshot.recognised:
             self.state.unparsed_alert_packets += 1
@@ -975,7 +1106,7 @@ class _Session:
             if self.sinks.feed is not None:
                 self.sinks.feed.publish_event(record)
 
-    def _publish(self, now: float | None = None) -> None:
+    async def _publish(self, now: float | None = None) -> None:
         state = self.state
         state.queue = self.ingest.metrics.as_dict()
         state.open_tracks = [track.summary() for track in self.tracker.open_tracks]
@@ -985,19 +1116,27 @@ class _Session:
             fix.detailed(include_coordinates=self.config.gnss.record_coordinates)
             if fix is not None else None
         )
-        publish_state(
+        await publish_state_async(
             self.state_dir, state, now, detail=self.config.collector.detail
         )
-        if self.sinks.mqtt is not None:
-            self.sinks.mqtt.publish_state(
-                build_detail_document(state, now) if self.config.mqtt.detail
-                else build_document(state, now)
-            )
-        if self.sinks.feed is not None:
-            self.sinks.feed.publish_state(
-                build_detail_document(state, now) if self.config.feed.detail
-                else build_document(state, now)
-            )
+        # Outward copies get the reduced sink status: no broker address, no
+        # database path.  Rebuilt around that rather than filtered afterwards,
+        # so a future key cannot leak by being forgotten in a filter.
+        outward = state.sinks
+        state.sinks = self.sinks.status(locating=False)
+        try:
+            if self.sinks.mqtt is not None:
+                self.sinks.mqtt.publish_state(
+                    build_detail_document(state, now) if self.config.mqtt.detail
+                    else build_document(state, now)
+                )
+            if self.sinks.feed is not None:
+                self.sinks.feed.publish_state(
+                    build_detail_document(state, now) if self.config.feed.detail
+                    else build_document(state, now)
+                )
+        finally:
+            state.sinks = outward
 
     # ------------------------------------------------------------------ run
 
@@ -1024,14 +1163,22 @@ class _Session:
                 state.compatible = False
                 state.status = "incompatible"
                 state.note = f"{len(missing)} required attribute(s) absent"
-                self._publish()
+                await self._publish()
                 return time.monotonic() - began
             state.compatible = True
 
             for uuid in (TELEMETRY_UUID, ALERT_UUID):
                 permitted = assert_live_readable(uuid)
                 try:
-                    payload = bytes(await client.read_gatt_char(permitted))
+                    # Bounded explicitly.  bleak's timeout covers connecting,
+                    # not a read that never answers, and in continuous mode
+                    # there is no outer deadline to catch one -- a stalled read
+                    # would hold the detector's link and the vehicle's radio
+                    # forever, silently.
+                    payload = bytes(await asyncio.wait_for(
+                        client.read_gatt_char(permitted),
+                        timeout=SETUP_TIMEOUT_SECONDS,
+                    ))
                 except Exception:  # noqa: BLE001 - absence is evidence, not fatal
                     continue
                 kind = _TELEMETRY if uuid == TELEMETRY_UUID else _ALERT
@@ -1045,9 +1192,13 @@ class _Session:
                 for uuid, kind in ((TELEMETRY_UUID, _TELEMETRY), (ALERT_UUID, _ALERT)):
                     permitted = assert_live_notifiable(uuid)
                     try:
-                        await client.start_notify(
-                            permitted,
-                            lambda _s, data, kind=kind: self._on_notification(kind, data),
+                        await asyncio.wait_for(
+                            client.start_notify(
+                                permitted,
+                                lambda _s, data, kind=kind:
+                                    self._on_notification(kind, data),
+                            ),
+                            timeout=SETUP_TIMEOUT_SECONDS,
                         )
                         subscribed.append(permitted)
                     except Exception:  # noqa: BLE001
@@ -1055,11 +1206,11 @@ class _Session:
 
                 if not subscribed:
                     state.status = "degraded"
-                    self._publish()
+                    await self._publish()
                     return time.monotonic() - began
 
                 state.status = "streaming"
-                self._publish()
+                await self._publish()
                 await self._pump(client)
             finally:
                 for permitted in subscribed:
@@ -1072,6 +1223,11 @@ class _Session:
                 self._dispatch(
                     self.tracker.close(seq=self.state.seq, wall_ns=time.time_ns())
                 )
+                # And forget what was on screen.  A detector switched off
+                # mid-alert would otherwise leave a Ka warning in the state
+                # file, the feed and the broker indefinitely, and a stale
+                # threat reads exactly like a live one.
+                self.state.clear_alerts()
 
         return time.monotonic() - began
 
@@ -1088,9 +1244,27 @@ class _Session:
                 wait = min(wait, max(0.0, self.deadline - time.monotonic()))
                 if wait <= 0:
                     return
+            # Clear *before* checking the queue, and skip the wait if anything
+            # is already there.  Clearing after a check would discard a wakeup
+            # for a record that arrived in between, and the consumer would then
+            # sit on it until the heartbeat.
             self.wake.clear()
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.wake.wait(), timeout=wait)
+            if not len(self.ingest):
+                # Raced against the stop event, so SIGTERM is acted on at once
+                # rather than whenever the next packet or heartbeat arrives.
+                waiters = [
+                    asyncio.ensure_future(self.wake.wait()),
+                    asyncio.ensure_future(self.stop.wait()),
+                ]
+                try:
+                    await asyncio.wait(
+                        waiters, timeout=wait, return_when=asyncio.FIRST_COMPLETED
+                    )
+                finally:
+                    for waiter in waiters:
+                        waiter.cancel()
+            if self.stop.is_set():
+                return
 
             now = time.monotonic()
             events = self._consume()
@@ -1106,11 +1280,20 @@ class _Session:
                 state.obd = await asyncio.to_thread(self.obd_probe)
                 if not state.obd.healthy:
                     state.status = "obd-blocked"
-                    self._publish(now)
+                    await self._publish(now)
                     return
 
             if not getattr(client, "is_connected", True):
                 state.note = "link dropped"
+                return
+
+            # A link BlueZ still calls connected but that has stopped speaking
+            # is the failure mode a reconnect exists for, and nothing else
+            # detects it: the OBD gate is green, the client is "connected", and
+            # the state file freezes on a reading that is quietly hours old.
+            age = state.age_seconds(now)
+            if age is not None and age > SILENCE_TIMEOUT_SECONDS:
+                state.note = "no packets"
                 return
 
             # Publish on a transition, or on the heartbeat.  A transition is
@@ -1118,7 +1301,7 @@ class _Session:
             # when nothing is happening.
             if events or (now - last_publish) >= heartbeat:
                 last_publish = now
-                self._publish(now)
+                await self._publish(now)
 
 
 async def _watchdog(state: CollectorState, stop: asyncio.Event) -> None:
@@ -1202,12 +1385,18 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
                 loop.add_signal_handler(signame, stop.set)
 
     sinks = Sinks(settings)
-    await sinks.start(stop, adapter=settings.collector.adapter)
-    watchdog = asyncio.create_task(_watchdog(state, stop))
+    watchdog: asyncio.Task | None = None
 
     attempt = 0
     ever_compatible = False
     try:
+        # Inside the try, so a failure anywhere after the history thread has
+        # started still reaches the finally that joins it.  Outside, a broker
+        # that refused a connection would leak a live writer thread holding an
+        # open database for the life of the process.
+        await sinks.start(stop, adapter=settings.collector.adapter)
+        watchdog = asyncio.create_task(_watchdog(state, stop))
+
         while not stop.is_set():
             if deadline is not None and time.monotonic() >= deadline:
                 break
@@ -1219,14 +1408,18 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
                 state.connected = False
                 state.compatible = False
                 state.status = "obd-blocked"
-                publish_state(state_dir, state, detail=settings.collector.detail)
+                await publish_state_async(
+                    state_dir, state, detail=settings.collector.detail
+                )
                 attempt += 1
                 await _wait(stop, next_backoff(attempt, rng), deadline)
                 continue
 
             state.status = "connecting"
             state.connected = False
-            publish_state(state_dir, state, detail=settings.collector.detail)
+            await publish_state_async(
+                state_dir, state, detail=settings.collector.detail
+            )
 
             session = _Session(
                 address, state, state_dir, stop, obd_probe, client_factory,
@@ -1271,19 +1464,24 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
                 attempt += 1
             state.reconnects += 1
             state.status = "reconnecting"
-            publish_state(state_dir, state, detail=settings.collector.detail)
+            await publish_state_async(
+                state_dir, state, detail=settings.collector.detail
+            )
             await _wait(stop, next_backoff(attempt, rng), deadline)
     finally:
         stop.set()
-        watchdog.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await watchdog
+        if watchdog is not None:
+            watchdog.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await watchdog
         state.connected = False
         state.compatible = False
         state.status = "stopped"
         state.note = state.note or "clean shutdown"
         state.sinks = sinks.status()
-        publish_state(state_dir, state, detail=settings.collector.detail)
+        await publish_state_async(
+            state_dir, state, detail=settings.collector.detail
+        )
         await sinks.close()
 
     return 0 if ever_compatible else 1

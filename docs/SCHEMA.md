@@ -675,9 +675,11 @@ can tell a measurement from a hypothesis without reading the source. Values are
 `observed` (seen on this R8), `upstream` (captured on an R8w), and `candidate`
 (decompiled from the R/Tach app, never confirmed against any hardware).
 
-Its keys are field *names*, not JSON paths into this document, and a few of them
-do not correspond to a key that is emitted at all. Treat it as a legend, not as
-an index — see [What the code does not do](#what-the-code-does-not-do).
+Its keys are the published paths — `voltage_v`, `detector_gps.speed_raw`,
+`alerts[].mute_code` — so a consumer can join a grade to a field by name. An
+earlier version graded names that nothing emitted, which made the map
+decorative; `test_every_confidence_key_names_something_actually_published` now
+holds it to the document it describes.
 
 ### Worked example
 
@@ -716,33 +718,36 @@ GNSS enabled and `record_coordinates` off:
     "status": "streaming"
   },
   "confidence": {
-    "alert.active": "upstream",
-    "alert.alert_id_raw": "upstream",
-    "alert.band": "upstream",
-    "alert.direction": "upstream",
-    "alert.frequency_ghz": "upstream",
-    "alert.laser_gun_id": "candidate",
-    "alert.mute_code": "upstream",
-    "alert.raw_signal": "upstream",
-    "alert.receive_mode_raw": "candidate",
-    "alert.strength": "upstream",
-    "alert_clear": "observed",
-    "brightness_status_raw": "upstream",
+    "alerts[].alert_id_raw": "upstream",
+    "alerts[].band": "upstream",
+    "alerts[].direction": "upstream",
+    "alerts[].field_5_raw": "upstream",
+    "alerts[].frequency_ghz": "upstream",
+    "alerts[].laser_gun": "candidate",
+    "alerts[].laser_gun_id": "candidate",
+    "alerts[].mute_code": "upstream",
+    "alerts[].mute_state": "candidate",
+    "alerts[].raw_signal": "upstream",
+    "alerts[].receive_mode_raw": "candidate",
+    "alerts[].strength_1_to_8": "upstream",
+    "alerts_empty": "observed",
+    "detector_gps.altitude_raw": "upstream",
+    "detector_gps.direction_8": "upstream",
+    "detector_gps.locked": "candidate",
+    "detector_gps.present": "observed",
+    "detector_gps.speed_raw": "upstream",
+    "detector_gps.status_raw": "observed",
     "field_count": "observed",
-    "gps.altitude_ft": "upstream",
-    "gps.direction_8": "upstream",
-    "gps.locked": "candidate",
-    "gps.speed_mph": "upstream",
-    "gps.status_raw": "observed",
-    "poi.active": "observed",
-    "poi.distance_raw": "candidate",
-    "poi.kind_raw": "candidate",
-    "poi.speed_limit_raw": "candidate",
-    "scan_raw": "candidate",
-    "voltage_v": "observed",
-    "warning_raw": "upstream",
-    "wifi_status_raw": "upstream"
-  },
+    "poi_warning.active": "observed",
+    "poi_warning.decoded": "candidate",
+    "poi_warning.raw": "observed",
+    "shape": "observed",
+    "unknown.field_3_raw": "upstream",
+    "unknown.field_4_raw": "upstream",
+    "unknown.field_5_raw": "upstream",
+    "unknown.field_6_raw": "upstream",
+    "voltage_v": "observed"
+},
   "counters": {
     "alert_packets": 63,
     "telemetry_packets": 1174,
@@ -1521,15 +1526,21 @@ none.
 
 | # | Claim | Reality |
 |---|---|---|
-| 1 | `events.py` says the history "stores the snapshots it worked from", so a better matcher can be re-run over the same data. | There is no snapshot table. `storage.py` stores derived events, throttled telemetry and GNSS fixes. The raw alert snapshots are not retained by the collector at all. A future matcher cannot be re-run against a recorded stream. |
-| 2 | Every event carries `algorithm`, "stored so a history spanning an algorithm change can still be read honestly". | `alert_events` has no `algorithm` column. The stamp survives in the JSON outputs and is dropped on the way into SQLite. |
-| 3 | An `alert_end` carries `directions`, the sequence of bearings over the encounter. | `alert_events` has no `directions` column either. It reaches the state file, MQTT and the feed, and not the database. |
-| 4 | `gnss_fixes` is a table of recorded fixes. | Nothing calls `HistoryWriter.record_fix`. The table is created, indexed, counted by `stats()` and swept by `prune()`, and stays empty. |
-| 5 | `collector.stale_after_seconds` is a configurable staleness threshold, range-checked 1–3600. | Nothing reads it. `build_document` uses the module constant `STALE_AFTER_SECONDS = 10.0`. `collector.HEALTH_INTERVAL_SECONDS` and `PUBLISH_INTERVAL_SECONDS` are likewise dead — the live values are `obd.interval_seconds` and `collector.heartbeat_seconds`. |
-| 6 | `feed.py` says an oversized request is "closed quietly rather than raised at the loop". | `_handle` catches `TimeoutError`, `asyncio.IncompleteReadError`, `ValueError` and `OSError`, but `asyncio.LimitOverrunError` derives from `Exception` directly and is not among them. A request larger than the stream reader's own limit escapes into `client_connected_cb` instead of closing the connection. `test_an_oversized_request_is_closed_quietly_rather_than_raised_at_the_loop` fails on it. The `MAX_REQUEST_BYTES` check below still covers everything under that limit. |
-| 7 | `FIELD_CONFIDENCE` reads like an index into the published document. | Several of its keys name fields that are never emitted — `poi.kind_raw`, `poi.distance_raw`, `poi.speed_limit_raw` — and others use different spellings from the JSON: `gps.speed_mph` and `gps.altitude_ft` against the emitted `detector_gps.speed_raw` and `detector_gps.altitude_raw`. It is a legend for the wire format, not a path map. |
-| 8 | `LiveSession.render()` prints POI detail when `--detailed` is given. | `LiveSession._render_detail` reads `poi.kind`, `poi.kind_raw`, `poi.distance_raw` and `poi.speed_limit_raw`, none of which exist on `PoiWarning` — it has `active` and `raw`. The line is unreachable today because no POI warning has ever been observed active, and it would raise `AttributeError` if one were. |
-| 9 | The bundled feed dashboard renders either document. | `paint()` reads `d.telemetry` and `d.detector_gps`. The first exists only in schema 1; the second exists in neither — schema 2 nests it at `detector.detector_gps`. With `feed.detail = true` the voltage, GPS and stale indicators go blank. |
+| 1 | `FIELD_CONFIDENCE` reads like an index into the published document, but some keys named fields nothing emitted. | **Fixed.** The keys are now the published paths — `detector_gps.speed_raw`, `alerts[].mute_code`, and so on — and `test_every_confidence_key_names_something_actually_published` pins that they stay that way. |
+| 2 | `LiveSession.render()` prints POI detail when `--full` is given. | **Fixed.** `_render_detail` reached for `PoiWarning` fields a later simplification had removed and would have raised `AttributeError` the first time a POI warning was active. It now prints field 1 verbatim and undecoded, and a regression test drives that path. |
+| 3 | The bundled feed dashboard renders either document. | **Fixed.** `paint()` read schema-1 paths only, so `feed.detail = true` blanked the voltage, GPS and stale indicators. It now normalises both shapes. |
+| 4 | `gnss_fixes` is a table of recorded fixes. | **Fixed.** Nothing called `HistoryWriter.record_fix`; fixes are now sampled on the telemetry throttle, respecting `record_coordinates`. |
+| 5 | `collector.stale_after_seconds` is a configurable staleness threshold. | **Fixed.** It is carried on `CollectorState` and read by both documents. `collector.HEALTH_INTERVAL_SECONDS` and `PUBLISH_INTERVAL_SECONDS` remain module constants that nothing reads — the live values are `obd.interval_seconds` and `collector.heartbeat_seconds`. |
+| 6 | `feed.py` closes an oversized request quietly rather than raising at the loop. | **Fixed.** `asyncio.LimitOverrunError` descends from `Exception` directly and escaped the handler into `client_connected_cb`. It is caught explicitly now, and the whole callback body has an outer guard. |
+| 7 | The history "stores the snapshots it worked from", so a better matcher can be re-run over the same data. | **Fixed.** There is an `alert_snapshots` table now, written before anything is derived. It is the one place a raw packet reaches the disk, and only alert packets: a telemetry payload would carry heading, speed, altitude and POI detail past both opt-ins in one column, and an alert payload carries no position at all. |
+| 8 | Every event carries `algorithm`, stored so a history spanning a matcher change can be read honestly. | **Fixed.** `alert_events.algorithm` exists. |
+| 9 | An `alert_end` carries `directions`, the bearings walked over the encounter. | **Fixed.** `alert_events.directions` exists. |
+
+Every one of these was found by writing this document against the code rather
+than against the intent, and every one is now closed. The table is kept rather
+than deleted because the method is the point: a reference that agrees with the
+documentation instead of the source is worse than no reference, and the next
+person to write one should expect to find the same kind of thing.
 
 None of these affects the safety boundary in `docs/SAFETY.md`. They are all
 places where an output is thinner than its documentation promises.

@@ -278,6 +278,24 @@ def _describe_bytes(dump: AttributeDump) -> list[str]:
     return lines
 
 
+#: Longest a 0x2901 description may be before it is treated as not a name.
+MAX_DESCRIPTION_CHARS: Final[int] = 48
+
+
+def _readable(payload: bytes) -> str | None:
+    """Return a short printable description, or ``None``.
+
+    The raw bytes are in the private capture either way; this is only what may
+    be printed.
+    """
+    text = payload.decode("utf-8", "replace").strip("\x00").strip()
+    if not text or len(text) > MAX_DESCRIPTION_CHARS:
+        return None
+    if not all(character.isprintable() for character in text):
+        return None
+    return text
+
+
 def _default_client(address: str, adapter: str | None = None):
     from bleak import BleakClient  # noqa: PLC0415 - deliberate lazy import
 
@@ -354,9 +372,12 @@ async def _session(
                     described = bytes(
                         await client.read_gatt_descriptor(int(handle))
                     )
-                    dump.described_as = described.decode("utf-8", "replace").strip(
-                        "\x00"
-                    ).strip() or None
+                    # Bounded and filtered.  This string comes off the device
+                    # and is printed to a terminal; a descriptor is meant to
+                    # hold a short human-readable name, so anything that is not
+                    # one is a finding for the private capture rather than
+                    # something to echo.
+                    dump.described_as = _readable(described)
                 except Exception:  # noqa: BLE001 - a missing description is fine
                     dump.described_as = None
             result.attributes.append(dump)

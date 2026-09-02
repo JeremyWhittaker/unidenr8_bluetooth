@@ -787,3 +787,70 @@ def test_the_collector_runs_with_the_obd_guard_disabled(tmp_path):
     assert document["obd"]["healthy"] is True
     assert _detail(tmp_path)["obd"]["guard_enabled"] is False
     assert "guard disabled" in document["obd"]["reason"]
+
+
+# ------------------------------------------------------- failure behaviour
+
+def test_a_live_alert_does_not_stay_latched_after_the_link_goes_away(tmp_path):
+    """The most dangerous stale value this program could publish.
+
+    A detector switched off mid-alert used to leave its last snapshot in the
+    state file, the feed and the broker forever, and a stale threat reads
+    exactly like a live one.
+    """
+    client = FakeClient(emit=[(gatt.ALERT_UUID, ALERT)])
+    _run(tmp_path, lambda: HEALTHY, lambda a: client)
+    assert _doc(tmp_path)["alerts"] == []
+    assert _detail(tmp_path)["alerts"] == []
+    assert _detail(tmp_path)["open_tracks"] == []
+
+
+def test_an_unwritable_state_directory_does_not_stop_the_collector(tmp_path):
+    """A full or read-only card must cost the state file, never the radar data."""
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY)])
+    code = asyncio.run(
+        collector.run(
+            RANDOM_STATIC, blocked, duration=0.2,
+            obd_probe=lambda: HEALTHY, client_factory=lambda a: client,
+            install_signal_handlers=False,
+        )
+    )
+    assert code in (0, 1), "it must exit, not raise"
+    assert client.exited, "the link was still released"
+
+
+def test_the_outward_documents_carry_no_broker_or_database_location(tmp_path):
+    """Publishing a broker's address to that broker discloses a network."""
+    from uniden_r8 import config as config_module
+
+    settings = config_module.Config(
+        obd=config_module.ObdConfig(guard=False),
+        history=config_module.HistoryConfig(enabled=True),
+    )
+    sinks = collector.Sinks(settings)
+
+    full = sinks.status()
+    reduced = sinks.status(locating=False)
+    assert set(full) == set(reduced)
+    for name, status in reduced.items():
+        for key in ("host", "port", "path", "bind"):
+            assert key not in status, f"{name}.{key} would have travelled"
+
+
+def test_the_instance_lock_is_the_same_lock_from_two_directories(tmp_path):
+    """A relative path taken from two working directories is two files.
+
+    That would let two collectors hold the detector at once, which is the exact
+    situation the lock exists to make impossible.
+    """
+    target = tmp_path / "state" / "collector.lock"
+    first = collector.SingleInstanceLock(target)
+    second = collector.SingleInstanceLock(
+        tmp_path / "state" / ".." / "state" / "collector.lock"
+    )
+    assert first.path == second.path
+    with first, pytest.raises(collector.InstanceBusy):
+        second.acquire()

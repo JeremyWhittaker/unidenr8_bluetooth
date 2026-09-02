@@ -122,7 +122,12 @@ COORDINATE_KEYS: Final[frozenset[str]] = frozenset(
 #: which a pair stops looking like two ordinary measurements and starts looking
 #: like a fix -- 33.4484,-112.0740 is roughly eleven metres of precision.
 _DECIMAL_PAIR_RE: Final[re.Pattern[str]] = re.compile(
-    r"[-+]?(?:90(?:\.0+)?|[0-8]?\d\.\d{3,})\s*,\s*"
+    r"[-+]?(?:90(?:\.0+)?|[0-8]?\d\.\d{3,})"
+    # Separator: a comma, a slash, a semicolon, or plain whitespace.  Written
+    # out because a coordinate pasted into prose is as often "33.4484 -112.0740"
+    # or "33.4484 / -112.0740" as it is comma-separated, and a gate that only
+    # knew the comma form would let the other two straight through.
+    r"(?:\s*[,;/]\s*|\s+)"
     r"[-+]?(?:180(?:\.0+)?|1[0-7]\d\.\d{3,}|\d?\d\.\d{3,})"
 )
 

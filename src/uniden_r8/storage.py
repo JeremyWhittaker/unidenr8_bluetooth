@@ -34,6 +34,25 @@ when ``gnss.record_coordinates`` is on.  Both default to off, because a history
 of where a vehicle has been is a different kind of file from a history of what
 its radar detector heard.
 
+**Alert payloads are stored verbatim; telemetry payloads never are.**  That
+asymmetry is deliberate and it is the one place this module keeps a raw packet.
+
+The reason to keep them: correlating an alert across snapshots is *inference*,
+and :mod:`uniden_r8.events` says so.  A derivation that is the only record makes
+every future improvement to the matcher worthless, because there is nothing left
+to re-run it against -- and this protocol is still being reverse-engineered, on
+a detector that has never yet produced a real detection.  ``alert_snapshots``
+is what makes "the snapshots are the record, the tracks are a view" a true
+statement rather than an aspiration.
+
+The reason telemetry payloads are excluded: the telemetry packet packs heading,
+speed, altitude and POI detail into one byte string, so a payload column for it
+would carry all of that past both opt-ins under a name that says nothing about
+what is inside.  An *alert* packet carries band, strength, frequency, direction
+and mute state -- and no position of any kind.  The privacy argument applies to
+one format and not the other, so the schema follows the argument rather than
+applying it uniformly and losing the thing worth keeping.
+
 The database is created ``0600`` inside a ``0700`` directory, and the retention
 sweep is the only thing that deletes rows.
 """
@@ -64,7 +83,7 @@ __all__ = [
 #: is diagnostic history, not a system of record, and a version mismatch is
 #: reported so the operator can archive the old file rather than silently
 #: reinterpreting rows written under different meanings.
-SCHEMA_VERSION: Final[int] = 1
+SCHEMA_VERSION: Final[int] = 2
 
 #: Cap on the write queue.  Everything here is small; a backlog this deep means
 #: the disk has stopped answering, and dropping is better than growing.
@@ -75,6 +94,17 @@ WRITE_QUEUE_MAX: Final[int] = 4096
 #: the time bound stops a quiet period from leaving the last alert unwritten.
 BATCH_ROWS: Final[int] = 64
 BATCH_SECONDS: Final[float] = 2.0
+
+#: How long the caller waits for the writer thread to open the database before
+#: giving up on it.  An SD card that has stopped answering must cost the
+#: history, not the collector's start-up.
+OPEN_TIMEOUT_SECONDS: Final[float] = 10.0
+
+#: Retention measures against the timestamp at this rank from the newest, not
+#: against the newest itself.  Ten is enough that a burst of rows written
+#: during the minute between boot and the first NTP answer cannot define the
+#: reference, and small enough to be exact on any database worth pruning.
+ROBUST_RANK: Final[int] = 10
 
 _SCHEMA: Final[tuple[str, ...]] = (
     """
@@ -114,6 +144,8 @@ _SCHEMA: Final[tuple[str, ...]] = (
         alert_id_raw   TEXT,
         receive_mode   TEXT,
         correlation    TEXT,
+        algorithm      TEXT,
+        directions     TEXT,
         material       INTEGER,
         duration_s     REAL,
         samples        INTEGER,
@@ -124,6 +156,20 @@ _SCHEMA: Final[tuple[str, ...]] = (
         gnss_mode      INTEGER,
         gnss_speed_mps REAL,
         gnss_track_deg REAL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS alert_snapshots (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id   INTEGER NOT NULL,
+        seq          INTEGER NOT NULL,
+        at           TEXT    NOT NULL,
+        wall_ns      INTEGER NOT NULL,
+        monotonic_ns INTEGER NOT NULL,
+        payload      TEXT    NOT NULL,
+        slot_count   INTEGER,
+        recognised   INTEGER,
+        rejected     INTEGER
     )
     """,
     """
@@ -164,6 +210,7 @@ _SCHEMA: Final[tuple[str, ...]] = (
     """,
     "CREATE INDEX IF NOT EXISTS alert_events_at ON alert_events (at)",
     "CREATE INDEX IF NOT EXISTS alert_events_track ON alert_events (session_id, track_id)",
+    "CREATE INDEX IF NOT EXISTS alert_snapshots_seq ON alert_snapshots (session_id, seq)",
     "CREATE INDEX IF NOT EXISTS telemetry_at ON telemetry (at)",
     "CREATE INDEX IF NOT EXISTS gnss_at ON gnss_fixes (at)",
 )
@@ -358,20 +405,58 @@ class History:
                 connection.execute("ROLLBACK")
             raise
 
+    def reference_wall_ns(self) -> int | None:
+        """A timestamp to measure retention against, robust to a few bad rows.
+
+        Not the maximum.  A Pi Zero 2 W has no battery-backed clock, so its
+        wall clock is wrong at every cold boot and steps by hours when the
+        network appears; a handful of rows written during that window can carry
+        a timestamp years out.  Taking the maximum would let *one* such row
+        define "now" and take the whole history with it.
+
+        So this takes the :data:`ROBUST_RANK`-th newest timestamp instead.  A
+        few outliers cannot move it, and on a database with fewer rows than
+        that it degenerates to the newest -- which is fine, because there is
+        very little there to lose.
+        """
+        rows = self.connection.execute(
+            "SELECT wall_ns FROM ("
+            "  SELECT wall_ns FROM alert_events"
+            "  UNION ALL SELECT wall_ns FROM alert_snapshots"
+            "  UNION ALL SELECT wall_ns FROM telemetry"
+            "  UNION ALL SELECT wall_ns FROM gnss_fixes"
+            "  UNION ALL SELECT started_wall_ns FROM sessions"
+            ") ORDER BY wall_ns DESC LIMIT 1 OFFSET ?",
+            (ROBUST_RANK,),
+        ).fetchone()
+        if rows is not None:
+            return int(rows["wall_ns"])
+        newest = self.connection.execute(
+            "SELECT MAX(wall_ns) AS newest FROM ("
+            "  SELECT wall_ns FROM alert_events"
+            "  UNION ALL SELECT wall_ns FROM alert_snapshots"
+            "  UNION ALL SELECT wall_ns FROM telemetry"
+            "  UNION ALL SELECT wall_ns FROM gnss_fixes"
+            "  UNION ALL SELECT started_wall_ns FROM sessions"
+            ")"
+        ).fetchone()
+        value = newest["newest"] if newest else None
+        return int(value) if isinstance(value, int) else None
+
+    #: Kept as the old name because the tests and the docs both use it.
     def newest_wall_ns(self) -> int | None:
-        """The newest timestamp anywhere in the database, or ``None`` if empty."""
-        newest: int | None = None
-        for table, column in (
-            ("alert_events", "wall_ns"), ("telemetry", "wall_ns"),
-            ("gnss_fixes", "wall_ns"), ("sessions", "started_wall_ns"),
-        ):
-            row = self.connection.execute(
-                f"SELECT MAX({column}) AS newest FROM {table}"  # noqa: S608
-            ).fetchone()
-            value = row["newest"] if row else None
-            if isinstance(value, int) and (newest is None or value > newest):
-                newest = value
-        return newest
+        """The single newest timestamp.  Reported, never used for retention."""
+        row = self.connection.execute(
+            "SELECT MAX(wall_ns) AS newest FROM ("
+            "  SELECT wall_ns FROM alert_events"
+            "  UNION ALL SELECT wall_ns FROM alert_snapshots"
+            "  UNION ALL SELECT wall_ns FROM telemetry"
+            "  UNION ALL SELECT wall_ns FROM gnss_fixes"
+            "  UNION ALL SELECT started_wall_ns FROM sessions"
+            ")"
+        ).fetchone()
+        value = row["newest"] if row else None
+        return int(value) if isinstance(value, int) else None
 
     def prune(self, retain_days: int) -> int:
         """Delete rows older than *retain_days*.  Returns rows removed.
@@ -379,29 +464,37 @@ class History:
         Zero means never expire, and is a decision rather than a default: the
         configuration says so out loud in :meth:`Config.warnings`.
 
-        **The reference instant is not simply "now".**  This runs on a Pi Zero
-        2 W, which has no battery-backed clock: at every cold boot the wall
-        clock reads whatever was written at the last shutdown, and it then
-        steps by hours when the network appears.  A retention sweep of the form
+        **The reference instant is neither "now" nor "the newest row".**  This
+        runs on a Pi Zero 2 W, which has no battery-backed clock: at every cold
+        boot the wall clock reads whatever was written at the last shutdown,
+        and it steps by hours when the network appears.  A sweep of the form
         "delete everything older than now minus thirty days" is a data-
         destruction trigger on hardware like that -- a clock that briefly reads
         a date in 2090 deletes the entire history, permanently, with no error.
 
-        So the reference is ``min(now, newest row we hold)``.  A clock stuck in
-        the past makes the cutoff early and deletes nothing; a clock jumped
-        into the future is ignored in favour of real data; and a correct clock
-        behaves as expected because the newest row is never in the future.
+        Using the newest *row* instead is better and still not enough: rows
+        written during that bad window carry the bad timestamp, and one of them
+        would then be the newest and do exactly the same damage.
+
+        So the reference is ``min(now, the tenth-newest timestamp)``.  A clock
+        stuck in the past makes the cutoff early and deletes nothing; a clock
+        jumped into the future is ignored in favour of the data; and a handful
+        of rows written under a wrong clock cannot move a rank statistic.
         """
         if retain_days <= 0:
             return 0
-        newest = self.newest_wall_ns()
-        reference = time.time_ns() if newest is None else min(time.time_ns(), newest)
+        reference = self.reference_wall_ns()
+        now = time.time_ns()
+        # `min` because a clock in the future must not be believed over the
+        # data, and a clock in the past simply prunes nothing.
+        reference = now if reference is None else min(now, reference)
         cutoff_ns = reference - retain_days * 86_400 * 1_000_000_000
         removed = 0
         connection = self.connection
         connection.execute("BEGIN")
         try:
-            for table in ("alert_events", "telemetry", "gnss_fixes"):
+            for table in ("alert_events", "alert_snapshots", "telemetry",
+                          "gnss_fixes"):
                 cursor = connection.execute(
                     f"DELETE FROM {table} WHERE wall_ns < ?", (cutoff_ns,)  # noqa: S608
                 )
@@ -427,7 +520,8 @@ class History:
                     f"SELECT COUNT(*) AS n FROM {table}"  # noqa: S608 - fixed names
                 ).fetchone()["n"]
             )
-            for table in ("sessions", "alert_events", "telemetry", "gnss_fixes")
+            for table in ("sessions", "alert_events", "alert_snapshots",
+                      "telemetry", "gnss_fixes")
         }
         span = connection.execute(
             "SELECT MIN(at) AS first, MAX(at) AS last FROM alert_events"
@@ -469,6 +563,14 @@ class History:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def snapshots(self, limit: int = 200) -> list[dict[str, Any]]:
+        """Raw alert notifications, newest first.  The re-derivable record."""
+        rows = self.connection.execute(
+            "SELECT * FROM alert_snapshots ORDER BY id DESC LIMIT ?",
+            (max(1, min(limit, 10_000)),),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def telemetry(self, limit: int = 200) -> list[dict[str, Any]]:
         rows = self.connection.execute(
             "SELECT * FROM telemetry ORDER BY id DESC LIMIT ?",
@@ -502,15 +604,18 @@ class HistoryWriter:
         retain_days: int = 30,
         record_motion: bool = False,
         record_coordinates: bool = False,
+        record_alert_snapshots: bool = True,
     ) -> None:
         self.path = Path(path)
         self.retain_days = retain_days
         self.record_motion = record_motion
         self.record_coordinates = record_coordinates
+        self.record_alert_snapshots = record_alert_snapshots
         self._queue: queue.Queue[_Write | None] = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._session_id = 0
         self._started = threading.Event()
+        self._stopping = threading.Event()
         self._open_error: str = ""
         self.queued = 0
         self.written = 0
@@ -537,14 +642,21 @@ class HistoryWriter:
         )
         self._thread.start()
         # Bounded: if the card is wedged, the collector still starts, with the
-        # failure visible in `healthy` rather than as a hang.
-        self._started.wait(timeout=10.0)
+        # failure visible in `healthy` rather than as a hang.  A timeout is a
+        # failure, not a success -- reporting one as healthy would have rows
+        # written under a session id of zero and no way to notice.
+        if not self._started.wait(timeout=OPEN_TIMEOUT_SECONDS):
+            self._open_error = "TimeoutError"
         return not self._open_error
 
     def stop(self, timeout: float = 10.0) -> None:
         """Flush and close.  Safe to call more than once."""
         if self._thread is None:
             return
+        # A flag as well as a sentinel.  A full queue would swallow the
+        # sentinel, and the thread would never be told to stop -- so the flag
+        # is what actually ends the loop and the sentinel only wakes it early.
+        self._stopping.set()
         with contextlib.suppress(queue.Full):
             self._queue.put_nowait(None)
         self._thread.join(timeout=timeout)
@@ -552,7 +664,18 @@ class HistoryWriter:
 
     @property
     def healthy(self) -> bool:
-        return self._thread is not None and not self._open_error
+        """Open, and actually writing.
+
+        Errors count, not just the open.  A writer that opened cleanly and has
+        since failed every commit -- a card that filled up mid-drive -- is not
+        healthy, and reporting it as such would put a green light on a history
+        that has silently stopped recording.
+        """
+        return (
+            self._thread is not None
+            and not self._open_error
+            and self.errors == 0
+        )
 
     def status(self) -> dict[str, Any]:
         return {
@@ -598,18 +721,44 @@ class HistoryWriter:
             "INSERT INTO alert_events (session_id, seq, kind, track_id, at, "
             "wall_ns, monotonic_ns, band, strength, raw_signal, frequency_ghz, "
             "laser_gun_id, direction, mute_code, alert_id_raw, receive_mode, "
-            "correlation, material, duration_s, samples, max_strength, "
-            "max_raw_signal, lat, lon, gnss_mode, gnss_speed_mps, gnss_track_deg) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "correlation, algorithm, directions, material, duration_s, samples, "
+            "max_strength, max_raw_signal, lat, lon, gnss_mode, gnss_speed_mps, "
+            "gnss_track_deg) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 self._session_id, event.seq, event.kind, event.track_id,
                 _iso(event.wall_ns), event.wall_ns, event.monotonic_ns,
                 alert.band, alert.strength, alert.signal, alert.frequency_ghz,
                 alert.laser_gun_id, alert.direction_name, alert.mute_code,
                 alert.alert_id_raw, alert.receive_mode_raw,
-                event.correlation, int(bool(event.material)),
+                event.correlation, event.algorithm, event.directions,
+                int(bool(event.material)),
                 event.duration_s, event.samples, event.max_strength,
                 event.max_raw_signal, lat, lon, mode, speed, track,
+            ),
+        )
+
+    def record_alert_snapshot(self, snapshot: Any, note: Any) -> None:
+        """Store one alert notification exactly as it arrived.
+
+        The lossless layer.  Tracks are derived from these and can be re-derived
+        from them; without this table, a better matcher written next year would
+        have nothing to run against.  Alert packets arrive only on a detection
+        change, so this is a handful of short rows per encounter rather than a
+        stream.
+        """
+        if not self.record_alert_snapshots:
+            return
+        self._offer(
+            "INSERT INTO alert_snapshots (session_id, seq, at, wall_ns, "
+            "monotonic_ns, payload, slot_count, recognised, rejected) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
+            (
+                self._session_id, note.seq, _iso(note.wall_ns), note.wall_ns,
+                note.monotonic_ns,
+                note.payload.decode("utf-8", "replace"),
+                snapshot.slot_count, int(bool(snapshot.recognised)),
+                snapshot.rejected_slots,
             ),
         )
 
@@ -685,6 +834,11 @@ class HistoryWriter:
                 stopping = True
             elif item is not _SENTINEL_TICK:
                 batch.append(item)
+            # The flag is the backstop for a sentinel that could not be queued
+            # because the queue was full.  It only ends the loop once the queue
+            # has been drained, so a stop never costs the rows already in it.
+            if self._stopping.is_set() and self._queue.empty():
+                stopping = True
 
             due = (
                 stopping

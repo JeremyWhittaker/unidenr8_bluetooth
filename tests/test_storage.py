@@ -84,7 +84,21 @@ FORBIDDEN_COLUMNS = frozenset(
      "data", "notification", "frame"}
 )
 
-EXPECTED_TABLES = frozenset({"meta", "sessions", "alert_events", "telemetry", "gnss_fixes"})
+EXPECTED_TABLES = frozenset(
+    {"meta", "sessions", "alert_events", "alert_snapshots", "telemetry", "gnss_fixes"}
+)
+
+#: The one table that holds a packet, and the only one permitted to.
+#:
+#: The privacy argument against a payload column is about the *telemetry*
+#: format specifically: it packs heading, speed, altitude and POI detail into
+#: one byte string, so storing it whole carries all of that past both opt-ins.
+#: An *alert* packet carries band, strength, frequency, direction and mute
+#: state, and no position of any kind -- so the argument does not reach it, and
+#: keeping alert packets is what makes the derived tracks re-derivable by a
+#: better matcher later.  The exemption is named here rather than widened into
+#: FORBIDDEN_COLUMNS, so it stays one table and one column.
+PAYLOAD_EXEMPTION = ("alert_snapshots", "payload")
 
 
 # ------------------------------------------------------------------ builders
@@ -124,6 +138,14 @@ def _started_writer(path, **options) -> storage.HistoryWriter:
         started_at=WALL_ISO, wall_ns=WALL_NS, monotonic_ns=MONOTONIC_NS, adapter="hci0",
     ) is True
     return writer
+
+
+def _notification(payload: bytes, seq: int = 1) -> events.Notification:
+    """One arrived packet, stamped, without needing a radio to produce it."""
+    return events.Notification(
+        seq=seq, kind="alert", payload=payload,
+        monotonic_ns=MONOTONIC_NS, wall_ns=WALL_NS,
+    )
 
 
 def _rows(path, table: str) -> list[dict]:
@@ -402,9 +424,51 @@ def test_no_table_in_the_schema_has_a_raw_payload_column(tmp_path):
             for column in columns:
                 name = str(column["name"]).lower()
                 declared = str(column["type"]).lower()
+                if (table, name) == PAYLOAD_EXEMPTION:
+                    continue
                 if name in FORBIDDEN_COLUMNS or "blob" in declared:
                     offenders.append(f"{table}.{column['name']} {column['type']}")
         assert not offenders, f"a raw payload column exists: {offenders}"
+
+
+def test_the_one_payload_column_holds_alerts_and_never_telemetry(tmp_path):
+    """The exemption has to stay exactly one table wide.
+
+    An alert packet carries no position; a telemetry packet carries heading,
+    speed, altitude and POI detail in a single field.  Storing the second whole
+    would undo both opt-ins in one line, so the test that the exemption exists
+    is only useful beside a test that it has not spread.
+    """
+    from uniden_r8 import telemetry as protocol
+
+    writer = _started_writer(tmp_path / "history.db")
+    note = _notification(b"1,00,KA,3,33,33.7850,R,1&0&0&0")
+    writer.record_alert_snapshot(protocol.parse_alert_snapshot(note.payload), note)
+    writer.record_telemetry(
+        _reading(), wall_ns=WALL_NS, monotonic_ns=MONOTONIC_NS
+    )
+    writer.stop()
+
+    snapshots = _rows(tmp_path / "history.db", "alert_snapshots")
+    assert len(snapshots) == 1
+    assert snapshots[0]["payload"] == "1,00,KA,3,33,33.7850,R,1&0&0&0"
+    assert snapshots[0]["recognised"] == 1
+
+    dumped = _dump(tmp_path / "history.db")
+    assert TELEMETRY_PACKET.decode() not in dumped, (
+        "a telemetry packet reached the disk whole"
+    )
+
+
+def test_alert_snapshots_can_be_switched_off(tmp_path):
+    """It is on by default, so the off direction is the one worth proving."""
+    from uniden_r8 import telemetry as protocol
+
+    writer = _started_writer(tmp_path / "history.db", record_alert_snapshots=False)
+    note = _notification(b"1,00,KA,3,33,33.7850,R,1&0&0&0")
+    writer.record_alert_snapshot(protocol.parse_alert_snapshot(note.payload), note)
+    writer.stop()
+    assert _rows(tmp_path / "history.db", "alert_snapshots") == []
 
 
 def test_no_stored_value_holds_the_packet_text(tmp_path):
@@ -715,7 +779,8 @@ def test_stats_reports_counts_a_span_and_a_size(tmp_path):
     assert stats["schema"] == storage.SCHEMA_VERSION
     assert stats["size_bytes"] > 0
     assert stats["counts"] == {
-        "sessions": 1, "alert_events": 3, "telemetry": 3, "gnss_fixes": 0,
+        "sessions": 1, "alert_events": 3, "alert_snapshots": 0,
+        "telemetry": 3, "gnss_fixes": 0,
     }
     assert stats["first_alert_at"] == WALL_ISO
     assert stats["last_alert_at"] == WALL_ISO
