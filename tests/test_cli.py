@@ -131,9 +131,9 @@ def test_a_missing_bleak_is_reported_not_crashed(tmp_path, capsys, monkeypatch):
 def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     """No subcommand writes an application characteristic.
 
-    `pair` changes BlueZ bond state; `identity` and `live` read, and `live`
-    also writes a CCCD to subscribe. None of them writes a value to a vendor
-    characteristic, which is the invariant.
+    `pair` changes BlueZ bond state; `identity`, `live` and `collect` read, and
+    the latter two also write a CCCD to subscribe. None of them writes a value
+    to a vendor characteristic, which is the invariant.
 
     The set is pinned so a new subcommand has to be justified here rather than
     appearing silently.
@@ -142,8 +142,15 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     actions = [a for a in parser._actions if a.dest == "command"]
     assert actions, "expected a subcommand action"
     assert set(actions[0].choices) == {
-        "plan", "selftest", "scan", "pair", "identity", "live",
+        "plan", "selftest", "scan", "pair", "identity", "live", "collect",
     }
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])
+def test_collect_refuses_a_nonpositive_or_nonfinite_duration(value):
+    with pytest.raises(SystemExit) as caught:
+        cli.build_parser().parse_args(["collect", "--duration", value])
+    assert caught.value.code == 2
 
 
 def test_no_subcommand_can_reach_an_application_write(tmp_path):

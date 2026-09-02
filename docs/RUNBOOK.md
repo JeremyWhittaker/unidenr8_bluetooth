@@ -275,12 +275,118 @@ and heading, speed and altitude are deliberately absent from the output.
 
 Afterwards, re-run the OBD invariant checks from step 1.
 
-## Step 6 — stop
+## Step 6 — the background collector
 
-The live path runs once and exits. Turning it into a background collector — a
-systemd unit, a database, a display — is a separate piece of work and needs its
-own review: a service holding the BLE link continuously has a very different
-relationship with the shared radio than a 30-second window does.
+The collector holds the detector link and publishes a small state document a
+display can read. **Run a bounded trial first**, and watch it, before
+considering a service — the same order the OBD project uses.
+
+### What it is, and is not
+
+It supplies **status**, not a real-time radar alert display. The e-paper panel
+refreshes every **300 seconds**, and a five-minute-old alert is not an alert.
+What the panel can usefully show is: is the detector linked, what is the
+battery voltage, is GPS locked, is anything currently being detected.
+
+The active-alert payload fields — band, strength, frequency, direction, mute —
+are still **unconfirmed on this R8**. Only an all-clear alert packet has ever
+been observed here. Treat any alert the collector reports as unverified until a
+real detection has been captured and checked.
+
+### A bounded trial
+
+```bash
+cd "$UNIDEN_ROOT"
+.venv/bin/python -m uniden_r8.cli collect --duration 300
+```
+
+Five minutes, then it stops itself. It resolves the detector from BlueZ's
+existing bond — no discovery, no pairing — checks the OBDLink is healthy before
+connecting, and writes `.state/state.json`.
+
+Watch the OBD side in another shell while it runs:
+
+```bash
+watch -n 5 'systemctl is-active hummer-rfcomm; rfcomm'
+```
+
+`rfcomm0:` must stay bound on channel 1 throughout. If it does not, stop the
+trial — `Ctrl-C` is handled: it unsubscribes, releases the link and publishes a
+`stopped` state.
+
+### Reading the state document
+
+```bash
+cat "$UNIDEN_ROOT/.state/state.json"
+```
+
+```json
+{
+  "schema": 1,
+  "collector": {"mode": "trial", "status": "streaming", "reconnects": 0},
+  "obd": {"healthy": true, "rfcomm_active": true, "device_present": true, "bound": true},
+  "link": {"connected": true, "compatible": true},
+  "counters": {"telemetry_packets": 297, "alert_packets": 1, "unparsed_telemetry": 0},
+  "telemetry": {"voltage": 13.6, "gps_locked": true, "poi_warning": false,
+                "age_s": 0.9, "stale": false},
+  "alerts": [],
+  "display_line": "R8 13.6V GPS clear"
+}
+```
+
+`display_line` is a convenience summary of at most 32 characters. The Hummer
+display deliberately does **not** trust it; it reconstructs its line from the
+typed fields below.
+
+`status` values: `starting`, `connecting`, `streaming`, `reconnecting`,
+`obd-blocked`, `incompatible`, `degraded`, `stopped`.
+
+**`obd-blocked` is not an error in this project.** It means the OBDLink was
+unhealthy and the collector let go of the detector on purpose. Investigate the
+OBD side, not this one.
+
+**`stale: true`** means telemetry stopped arriving more than 10 s ago. A frozen
+reading is worse than a blank one, so the display line says `STALE`.
+
+### Wiring it to the e-paper display
+
+Implemented in the sibling `hummer-obd` display. It reads
+`/home/jeremy/unidenr8/.state/state.json`, requires schema 1 and a recent UTC
+timestamp, validates every type, and builds one short line from allowlisted
+status/band/direction values plus voltage and GPS lock. It never prints the
+collector's `display_line` or free-form text. Missing, malformed, unknown or
+implausibly future state falls back to the original Tailscale line; valid old
+state becomes `r8 stale`. The sixth OBD line and 300-second refresh interval
+are unchanged.
+
+### Installing it as a service
+
+**Not done here, and it needs `sudo`.** After a trial has been watched through
+a real drive:
+
+```bash
+sudo install -m 0644 systemd/unidenr8-collector.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start unidenr8-collector      # start and watch; do not enable yet
+systemctl status unidenr8-collector
+```
+
+The unit has an `[Install]` section so Jeremy can later enable it explicitly,
+but nothing in this project does so. First observe a drive with active OBD
+polling. Only after that stronger coexistence check, enable boot startup with
+`sudo systemctl enable unidenr8-collector.service`. It orders itself after
+`hummer-rfcomm` but does not `Want` or `Require` it — see `docs/SAFETY.md`.
+
+The display code is deployed separately and its existing service must be
+restarted once to load it: `sudo systemctl restart hummer-display.service`.
+Neither command restarts or edits `hummer-rfcomm.service`.
+
+## Step 7 — stop
+
+The `live` path runs once and exits. The separately reviewed collector can run
+continuously, but remains opt-in: the parked five-minute trial proved clean
+teardown and no OBD binding disruption, not throughput during active polling
+or an entire drive.
 
 ---
 
@@ -296,6 +402,7 @@ executed by any agent:
 |---|---|---|
 | `rfkill list bluetooth` shows soft-blocked | `sudo rfkill unblock bluetooth` | Not currently blocked on this node — `hci0` is `UP RUNNING`. |
 | `bluetoothctl pair` fails `AccessDenied` or "Rejected send message" | `sudo usermod -aG bluetooth $USER`, then log out and back in | Only if a `bluetooth` group exists and gates pairing. This node has no such group, and scanning works without it. |
+| Install/start the reviewed collector and load the display reader | `sudo install -m 0644 /home/jeremy/unidenr8/systemd/unidenr8-collector.service /etc/systemd/system/unidenr8-collector.service && sudo systemctl daemon-reload && sudo systemctl start unidenr8-collector.service && sudo systemctl restart hummer-display.service` | Starts only the new R8 service and restarts only the display; it does not touch `hummer-rfcomm`. Do not enable at boot until an active-polling drive is observed. |
 
 Neither is needed today.
 

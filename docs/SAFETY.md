@@ -13,7 +13,7 @@ following, and nothing in it can.
 
 | Invariant | Enforced by |
 |---|---|
-| `hummer-rfcomm.service` is never edited, stopped, started, enabled, disabled or reloaded. | This project ships no systemd unit and never calls `systemctl`. The one external program it runs is `bluetoothctl`, through a fixed-binary allowlist — see §1a. |
+| `hummer-rfcomm.service` is never edited, stopped, started, enabled, disabled or reloaded. | The collector runs only `systemctl is-active hummer-rfcomm` as a query. Its own unit has only an `After=` ordering edge to the OBD unit — never `Wants=`, `Requires=`, restart propagation or a mutating command. |
 | `/dev/rfcomm0` is never opened, released, rebound or reconfigured. | Nothing here imports `serial`, `pyserial` or `os.open` on a device node. `/dev/rfcomm0` is `root:dialout`, and this project runs as `jeremy` and never asks for it. |
 | `/etc/default/hummer-rfcomm` is untouched. | Root-owned; this project never runs `sudo` and never writes outside its own tree. |
 | The OBDLink **bond** and its trust state are untouched. | `pairing.py` discovers the existing bond set at run time and refuses every command naming one of them. See §1a. |
@@ -22,9 +22,11 @@ following, and nothing in it can.
 
 ## 1a. The one external program, and its guards
 
-`uniden_r8/pairing.py` runs `bluetoothctl`. It is the only module that runs
-anything, and it exists because BlueZ has no other supported way to complete a
-pairing agent exchange. It is also the most dangerous code here, because
+`uniden_r8/pairing.py` runs `bluetoothctl`. It is the only module that can make
+a persistent external change, and it exists because BlueZ has no other
+supported way to complete a pairing agent exchange. The collector separately
+runs two fixed read-only health queries, `systemctl is-active` and `rfcomm`
+without arguments. Pairing remains the most dangerous code here, because
 `bluetoothctl` can reach the OBDLink as easily as the detector.
 
 Four guards, all tested in `tests/test_pairing_guards.py`:
@@ -250,7 +252,73 @@ and the alert fields a detector exists to report. Heading, speed, altitude and
 POI detail are parsed nowhere and published nowhere: they describe where Jeremy
 is and has been.
 
-There is no background service and no systemd unit.
+The bounded `live` command itself remains a one-shot diagnostic. The separate
+collector below is the only continuous path and its unit is not installed by
+this repository.
+
+### The background collector
+
+`uniden_r8/collector.py` is the first thing here meant to run for hours, and
+length is what makes it different: a 30-second window that shares the radio is
+a nuisance, an unattended process that does it all night is a hazard. So its
+design starts from the OBDLink.
+
+**The OBDLink is checked, not assumed.** An injected read-only probe runs
+before the detector link opens and every 15 s while it is held. It asks three
+questions — is `hummer-rfcomm` active, does `/dev/rfcomm0` exist, does BlueZ
+report a binding on it — using `systemctl is-active` and `rfcomm` as *queries*.
+If the answer is no, the detector link is released promptly, an `obd-blocked`
+state is published, and the collector backs off rather than retrying into a
+busy radio.
+
+It never starts, stops, restarts, enables, disables or masks a unit; never
+binds or releases `/dev/rfcomm0`; never opens the serial device; and never
+reconfigures the Bluetooth controller or service.
+`test_the_collector_never_mutates_a_service_or_rfcomm` checks every command
+vector in the module against a list of mutating verbs — vectors rather than all
+strings, because prose legitimately discusses stopping things.
+
+**One instance only.** A `flock` on the state directory makes a second
+collector refuse rather than silently steal the link, and it is released on
+every exit path.
+
+**Bounded reconnection.** Exponential backoff from 5 s to a 300 s cap with ±20%
+jitter, reset only after a session that lasted at least 30 s. Without that last
+condition a link that connects and immediately drops looks like success and
+retries instantly, forever.
+
+**The trial deadline is enforced twice:** inside the streaming loop and by an
+outer asyncio ceiling around the complete BLE session. The outer ceiling also
+cancels a connect/read/subscribe call that never returns. Nonpositive, NaN and
+infinite CLI durations are rejected before bond lookup or link construction.
+A healthy session once ignored the duration entirely; a test caught that real
+bug by hanging, and the hung-GATT regression now pins the stronger boundary.
+
+**Raw packets are not retained.** The one-shot `live` command remains the
+explicit private diagnostic capture. A long-running process that accumulated
+payloads would grow without bound on a 415 MiB node and turn every crash into a
+disclosure question.
+
+**Nothing published can carry an identifier.** The state document has no
+address, no token, no raw payload, no heading, speed or altitude, no POI detail,
+and no exception text — BlueZ error strings contain addresses, so failures are
+recorded as fixed phrases like `session failed` rather than as messages. Band
+and direction are mapped through an allowlist, so an unrecognised value is
+published as `unknown` instead of echoing an arbitrary string from the device.
+
+**No unit is installed.** `systemd/unidenr8-collector.service` is a template
+for deliberate manual installation. It orders itself `After=hummer-rfcomm` but
+deliberately does **not** `Want` or `Require` it: a unit that can start the
+vehicle's RFCOMM binding is a unit that can interfere with it, and the
+collector's own health check is the real protection. Its `[Install]` section
+only makes a later, explicit `systemctl enable` possible; nothing here invokes
+that command.
+
+**The display is a separate, untrusted consumer.** The sibling Hummer display
+requires schema 1, a recent timestamp and typed/allowlisted fields. It builds
+its own short line and ignores `display_line`, notes, reasons, identifiers,
+positions and raw data. Missing or invalid state falls back to the existing
+Tailscale line, while the OBD line remains unchanged.
 
 ### If a write is ever wanted
 

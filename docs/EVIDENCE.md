@@ -355,3 +355,75 @@ nowhere — they describe where Jeremy is and where he has been, and none of the
 is needed to answer what the detector is currently reporting. Published output
 carries voltage, GPS-fix state, a POI-warning boolean, and the alert fields a
 radar detector exists to report.
+
+---
+
+## 8. The supervised collector trial
+
+One bounded 300-second collector trial from the node, 2026-09-02T04:50:39Z to
+04:55:42Z, with the OBDLink sampled every 5 s throughout and for 35 s
+afterwards (68 samples). The detector was already bonded; no discovery, no
+pairing.
+
+### Collector result
+
+| # | Observation | Grade |
+|---|---|---|
+| 8.1 | **293 telemetry packets in 300 s** (~0.98/s), **0 unparsed**. | OBSERVED |
+| 8.2 | **0 reconnects.** The link was established once and held for the full five minutes. | OBSERVED |
+| 8.3 | The trial stopped itself at 303 s and exited 0, publishing `status: stopped`, `note: clean shutdown`, `connected: false`. | OBSERVED |
+| 8.4 | Voltage moved from 12.3 V (no GPS fix) at the start to 13.6 V with a fix by the end. The cause of that change was not established. | OBSERVED |
+| 8.5 | State directory `0700`, `state.json` and `collector.lock` both `0600`. No collector process and no held lock remained afterwards. | OBSERVED |
+| 8.6 | One alert packet, from the initial read; no alert notifications. Nothing was detected. | OBSERVED |
+
+### OBDLink contention — the question the trial existed to answer
+
+All 68 samples, without exception:
+
+| Check | Result |
+|---|---|
+| `hummer-rfcomm` active | **always** |
+| `/dev/rfcomm0` present | **always** |
+| Binding present | **always** |
+| Binding state | **`connected` in every sample** — never dropped, never closed |
+| `hci0` RX and TX error counters | **`0` and `0` in every sample** |
+
+Controller byte-counter deltas correlated with the BLE window (they are
+controller-wide counters, not packet attribution):
+
+* during the trial: **RX +14,392 bytes over 295 s (~49 B/s)**, TX +372 bytes —
+  a receive-dominated load, as a notify-only path should be;
+* for 35 s after it ended: **RX +0 bytes** — the traffic stopped cleanly when
+  the collector released the link.
+
+**Conclusion: no link-state disruption was observed.** The vehicle's RFCOMM
+binding survived a five-minute BLE session untouched and controller error
+counters remained zero. Throughput contention was not measured.
+
+### What this trial does *not* establish
+
+Two limits, both worth stating plainly:
+
+1. **The OBD collector was not running.** `hummer-collector` is disabled and
+   inactive, so the RFCOMM link was bound and idle rather than actively
+   carrying poll traffic. This measures a BLE session alongside an *idle* OBD
+   link, not alongside active polling. The stronger test is a trial run
+   concurrently with an OBD collection trial.
+2. **Throughput was not measured, and cannot be here.** Confirming the OBD link
+   still *works* would mean opening `/dev/rfcomm0`, which this project must
+   never do. The evidence is that the binding and the controller stayed
+   healthy — not that a poll would have succeeded.
+
+Five minutes is also not a drive. The result is encouraging and is not yet a
+warrant for enabling a service at boot.
+
+### Parent hardening check
+
+After the supervised trial, parent review added rejection of zero, negative,
+NaN and infinite durations plus an outer asyncio ceiling covering a stuck GATT
+operation. The hardened code was redeployed without installing a unit. A
+15-second follow-up trial received 13 telemetry packets with zero unparsed and
+zero reconnects, exited 0 after bounded disconnect cleanup, left the detector
+disconnected, and again left `hummer-rfcomm` active with `rfcomm0` bound and
+zero failed units. This was a code-path check, not additional OBD-throughput
+evidence.

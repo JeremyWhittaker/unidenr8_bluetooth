@@ -87,7 +87,7 @@ in `live-receive-task.md` and run once against the real detector.
 | Conservative published fields | implemented | `test_no_published_field_carries_position` — heading/speed/altitude/POI detail absent; `test_raw_payloads_are_not_in_the_published_output` asserts altitude never reaches output |
 | Evidence-graded parsing | implemented | Telemetry's observed seven-field shape is enforced; active-alert values remain upstream evidence. Unknown telemetry/alert packets get separate counters and are not reflected into public output. |
 | Bounded session, deterministic teardown incl. partial failure and timeout | implemented | 5–120 s clamp plus connect/cleanup overhead; `test_a_failed_subscription_does_not_stop_the_other`, `test_timeout_unsubscribes_and_disconnects_after_partial_setup`, and the other teardown/timeout tests |
-| No daemon or systemd service | implemented | Runs once and exits; no unit shipped |
+| No daemon in the bounded `live` phase | implemented | `live` runs once and exits; the separately reviewed collector/unit is tracked below |
 | Bounded real capture | done | 30 s window, 32 packets; see `docs/EVIDENCE.md` §7 |
 
 **Result: the telemetry payload format is now confirmed on this R8** — 31/31
@@ -137,6 +137,53 @@ invariants.
 | 8 | `bonded_devices` must fail closed on any nonzero return | **implemented** — `pairing.bonded_devices` now raises on any nonzero code including 124-with-output. Regression: `test_any_nonzero_bluetoothctl_return_fails_closed` (5 cases), plus tests that a clean zero and a legitimately empty list still pass. |
 | 9 | Pairing postconditions must fail loudly | **implemented** — the CLI returns 1 and prints `PAIRING POSTCONDITION FAILED` with the remedial command if the device is left trusted or connected, even when the bond succeeded. Four tests. |
 | 10 | Re-run everything, deploy, update statuses and summary | **implemented** — see the final summary artifact. |
+
+---
+
+## Background collector (`background-collector-task.md`)
+
+| Requirement | Status | Evidence |
+|---|---|---|
+| Injected read-only OBD health probe; require `hummer-rfcomm` active and `/dev/rfcomm0` present/bound | implemented | `default_obd_probe`; `test_the_probe_only_queries` asserts the exact argv pairs |
+| Check before connecting and periodically while connected | implemented | Checked in `run` before each session and every 15 s in `_stream`; `test_an_unhealthy_obd_prevents_the_link_from_ever_opening` asserts **no client is even constructed**; `test_obd_health_lost_during_a_session_releases_the_link` |
+| On failure: release, publish obd-blocked, back off | implemented | `test_obd_health_lost_during_a_session_releases_the_link` asserts teardown and unsubscribe |
+| Never mutate a unit, RFCOMM, controller, or serial | implemented | `test_the_collector_never_mutates_a_service_or_rfcomm` checks every command vector against a banned-verb list |
+| Reuse the bond in memory; no discovery/pair/trust/connect | implemented | `bonded_detector_address()`; no scan path in the collector |
+| Keep the compatibility gate and conservative parsers | implemented | `test_the_compatibility_gate_refuses_a_wrong_service_parentage`, `test_the_gate_refuses_a_missing_characteristic` — both assert nothing is read |
+| Continuous mode plus hard-bounded `--duration` trial | implemented | Deadline inside `_stream` plus outer session ceiling; `test_trial_mode_is_bounded`, `test_a_healthy_streaming_session_still_honours_the_trial_deadline`, `test_a_hung_gatt_read_cannot_outlive_the_trial_deadline`; invalid/nonfinite durations are refused before link construction |
+| SIGTERM/SIGINT and cancellation unsubscribe, disconnect, publish stopped/degraded | implemented | Signal handlers set a stop event; `finally` publishes; `test_a_stop_event_tears_down_and_publishes_stopped`, `test_no_subscription_at_all_is_degraded_not_a_hang` |
+| Bounded exponential backoff with jitter, reset after a healthy session | implemented | `next_backoff`; `test_backoff_grows_and_is_capped`, `..._is_jittered`, `..._never_returns_zero`, `test_a_healthy_session_resets_the_backoff` |
+| Single-instance lock, released on every exit path | implemented | `SingleInstanceLock` (flock); `test_a_second_instance_is_refused`, `..._released_and_reusable`, `..._owner_only` |
+| One sanitized, schema-versioned state JSON, atomic, 0700/0600 | implemented | `publish_state` via `os.replace`; `test_the_state_file_and_directory_are_owner_only`, `test_the_document_is_schema_versioned`, `test_the_write_is_atomic_and_leaves_no_temporary` |
+| Freshness, health, counters, conservative telemetry, alerts, display line | implemented | `build_document`; `test_counters_are_published`, `test_staleness_is_reported`, `test_the_display_line_is_short_enough_for_the_panel` |
+| Never publish address, token, raw packet, heading/speed/altitude, POI detail, exception text, arbitrary detector strings | implemented | `test_the_document_never_carries_position_or_identifiers`, `test_no_exception_text_reaches_the_state_file`, `test_an_unrecognised_band_is_not_echoed`, `test_an_unrecognised_direction_is_not_echoed` |
+| No continuous raw retention; bounded queues/counters | implemented | `test_no_raw_payload_is_retained`, `test_published_alerts_are_bounded`; the one-shot `live` command keeps its private capture unchanged |
+| Hardened systemd unit template, not installed | implemented | `systemd/unidenr8-collector.service`: `User=jeremy`, venv `ExecStart`, `After=` (not `Wants`/`Requires`) `hummer-rfcomm`, start-limit, `UMask=0077`, empty capabilities, `NoNewPrivileges`, `PrivateTmp`, `ProtectSystem=strict`, `ProtectHome=read-only`, one state `ReadWritePaths`; `[Install]` permits only a later explicit enable |
+| CLI suitable for the unit and a trial; `--json` parseable where applicable | implemented | `collect --state-dir --duration`; the state document is JSON by construction |
+
+### One real bug this phase found
+
+`--duration` was checked only *between* sessions, so a trial whose session
+stayed healthy would never stop — the streaming loop had no deadline. Found by a
+test that hung rather than failed. Fixed by threading the deadline into
+`_stream`, with `test_a_healthy_streaming_session_still_honours_the_trial_deadline`
+pinning it.
+
+### The supervised trial — run
+
+Run at Jeremy's direct instruction after the build was accepted: one bounded
+300 s trial with the OBDLink sampled every 5 s. 293 telemetry packets, 0
+unparsed, 0 reconnects, clean self-termination at 303 s, exit 0. Every one of
+68 OBD samples showed the binding `connected` with zero `hci0` errors. Details
+and the two limits of the result in `docs/EVIDENCE.md` §8.
+
+### Not done, deliberately
+* No unit installed, enabled, started or restarted; no `sudo`. The trial was
+  run as a foreground-launched bounded process, not as a service.
+* The worker did not write the e-paper consumer because the sibling was
+  read-only to it. The parent implemented the narrowly admitted sibling slice:
+  a defensive schema/freshness/type/allowlist reader, focused tests and visual
+  QA, without changing the OBD line or refresh interval.
 
 ---
 

@@ -14,11 +14,12 @@ Two things it will not do, by construction rather than by configuration:
   scans actively by default, and connections, reads and subscriptions all
   exchange frames. What none of them do is carry a command to the detector.
   See [docs/SAFETY.md](docs/SAFETY.md).
-* **It does not manage or rebind the OBDLink.** No `systemctl`, no serial
-  import, no `sudo`, no systemd unit, and nothing that touches `/dev/rfcomm0`
-  or `hummer-rfcomm.service`. It installs to its own tree. BLE still shares the
-  physical controller, which is why sessions are bounded and OBD state is
-  checked before and after hardware runs.
+* **It does not manage or rebind the OBDLink.** No serial import, no `sudo`, and
+  nothing opens or reconfigures `/dev/rfcomm0` or mutates
+  `hummer-rfcomm.service`. The collector only queries `systemctl is-active` and
+  `rfcomm`; its systemd unit is an inert template until Jeremy installs it. It
+  installs to its own tree. BLE still shares the physical controller, which is
+  why sessions are bounded and OBD state is checked around hardware runs.
 
   One module — `pairing.py` — does run an external program: `bluetoothctl`,
   and only through a strict guard. Fixed binary, no shell, a short verb
@@ -72,6 +73,7 @@ uniden-r8 scan        # bounded advertisement-only discovery. Sanitized.
 uniden-r8 pair        # bond with the detector. Needs --confirm.
 uniden-r8 identity    # GATT-read the Device Information characteristics.
 uniden-r8 live        # bounded receive-only telemetry and alerts.
+uniden-r8 collect     # background collector; publishes display state.
 ```
 
 ```
@@ -87,10 +89,10 @@ alerts: 0
 ```
 
 `plan` and `selftest` use no radio at all. `scan` uses it for
-advertisement-only discovery and never connects. `pair`, `identity` and `live`
-do connect — and `pair` is the one command that runs `bluetoothctl` and changes
+advertisement-only discovery and never connects. `pair`, `identity`, `live` and
+`collect` do connect — and `pair` is the one command that runs `bluetoothctl` and changes
 persistent state, which is why it refuses to act without `--confirm` and fails
-loudly if the result is left trusted or connected. `live` writes a CCCD to
+loudly if the result is left trusted or connected. `live` and `collect` write a CCCD to
 subscribe, which is a protocol descriptor write. **None of them writes a value
 to an application characteristic**, and none reads POI or settings.
 
@@ -106,6 +108,54 @@ strong    R8@nam:2cf1419a567c    ble:bd5fb706914d  -69 dBm, random-static
 No address appears in that output, and none can: addresses become salted
 tokens at the point the report is built, and `evidence.publish()` refuses to
 print a string that still contains one.
+
+## The background collector
+
+```bash
+uniden-r8 collect --duration 300     # bounded trial; watch it
+uniden-r8 collect                    # continuous, until SIGTERM
+```
+
+It holds the detector link and writes one small, schema-versioned document that
+a display can read:
+
+```json
+{"schema": 1,
+ "collector": {"status": "streaming", "reconnects": 0},
+ "obd": {"healthy": true, "rfcomm_active": true, "bound": true},
+ "telemetry": {"voltage": 13.6, "gps_locked": true, "stale": false},
+ "alerts": [],
+ "display_line": "R8 13.6V GPS clear"}
+```
+
+**The OBDLink comes first, and it is checked rather than assumed.** A read-only
+probe runs before the link opens and every 15 s while it is held; if
+`hummer-rfcomm` is not active or `/dev/rfcomm0` is not bound, the detector link
+is released, `obd-blocked` is published, and the collector backs off. It never
+starts, stops or reconfigures a unit, never binds or releases `/dev/rfcomm0`,
+and never opens the serial device.
+
+**It is a status feed, not an alert display.** The e-paper panel refreshes every
+300 s, and a five-minute-old radar alert is not an alert. The active-alert
+payload fields also remain unconfirmed on this R8 — only an all-clear packet has
+been observed — so treat any reported alert as unverified.
+
+**Trial result:** one 300-second run held the link with **293 telemetry packets,
+0 unparsed, 0 reconnects**, and stopped itself cleanly. The OBDLink was sampled
+every 5 s throughout: the binding stayed `connected` in all 68 samples and the
+controller error counters stayed at zero. No link-state disruption was
+observed. The OBD collector was idle, however, so throughput under active
+polling remains untested.
+
+The sibling Hummer display now has a defensive schema-1 reader for this state.
+It checks freshness and types, constructs its own allowlisted line, preserves
+the existing OBD line, and deliberately ignores the preformatted
+`display_line` and every free-form field.
+
+No service is installed. `systemd/unidenr8-collector.service` is a template for
+deliberate manual installation. It can be started for a watched drive, but it
+should not be enabled at boot until coexistence with active OBD polling has also
+been observed.
 
 ## Install
 
@@ -128,12 +178,14 @@ machine with no Bluetooth stack.
 | `src/uniden_r8/privacy.py` | Salted tokenisation of addresses and names. |
 | `src/uniden_r8/evidence.py` | The `0700`/`0600` private store, and the publish gate. |
 | `src/uniden_r8/discovery.py` | Bounded, advertisement-only discovery. |
-| `src/uniden_r8/cli.py` | `plan`, `selftest`, `scan`, guarded `pair`, read-only `identity`, and bounded `live`. |
+| `src/uniden_r8/cli.py` | `plan`, `selftest`, `scan`, guarded `pair`, read-only `identity`, bounded `live`, and the OBD-gated collector. |
 | `docs/SAFETY.md` | The boundary: OBD invariants, read-only rules, privacy. |
 | `docs/EVIDENCE.md` | Every claim, with its source and its grade. |
 | `src/uniden_r8/pairing.py` | Guarded `bluetoothctl` driver. Protects the OBDLink bond. |
 | `src/uniden_r8/identity.py` | Connected Device Information reads. No characteristic writes. |
 | `src/uniden_r8/telemetry.py` | Bounded receive-only live data. Telemetry and alerts only. |
+| `src/uniden_r8/collector.py` | Background collector. OBD health gate, single-instance lock, display state. |
+| `systemd/unidenr8-collector.service` | Unit template. **Not installed by anything here.** |
 | `docs/RUNBOOK.md` | Firmware check, deploy, discovery, and what to do when it is empty. |
 | `docs/REQUIREMENTS.md` | Parent-review checklist with status and evidence. |
 

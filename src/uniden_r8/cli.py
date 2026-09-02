@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import math
 import sys
 from pathlib import Path
 
@@ -63,6 +64,20 @@ __all__ = ["build_parser", "main"]
 
 #: Default private store, relative to the project root.  Git-ignored.
 DEFAULT_STORE = ".private"
+
+#: Default collector state directory.  Separate from the private store: this
+#: holds a sanitized document meant to be read by a display, not raw evidence.
+DEFAULT_STATE_DIR = ".state"
+
+
+def _positive_finite_seconds(value: str) -> float:
+    try:
+        seconds = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("duration must be a number") from exc
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("duration must be finite and greater than zero")
+    return seconds
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -148,6 +163,20 @@ def build_parser() -> argparse.ArgumentParser:
     live_parser.add_argument(
         "--save", metavar="NAME",
         help="also write the sanitized session into the private store under NAME",
+    )
+
+    collect_parser = sub.add_parser(
+        "collect",
+        help="background collector: hold the link, publish display state",
+    )
+    collect_parser.add_argument(
+        "--state-dir", default=DEFAULT_STATE_DIR,
+        help=f"where state.json is written, 0700 (default: {DEFAULT_STATE_DIR})",
+    )
+    collect_parser.add_argument(
+        "--duration", type=_positive_finite_seconds, default=None,
+        help="bounded trial: stop after this many seconds (default: run until "
+             "SIGTERM/SIGINT)",
     )
     return parser
 
@@ -470,6 +499,36 @@ def _cmd_live(store_path: str, seconds: float | None, as_json: bool,
     return 0 if session.compatible else 1
 
 
+def _cmd_collect(state_dir: str, duration: float | None) -> int:
+    from .collector import InstanceBusy, SingleInstanceLock, run
+    from .pairing import PairingRefused, bonded_detector_address
+
+    try:
+        address = bonded_detector_address()
+    except (LookupError, PairingRefused) as exc:
+        print(publish(str(exc)), file=sys.stderr)
+        return 1
+
+    lock = SingleInstanceLock(Path(state_dir) / "collector.lock")
+    try:
+        lock.acquire()
+    except InstanceBusy as exc:
+        print(str(exc), file=sys.stderr)
+        return 3
+
+    mode = f"bounded trial, {duration:g}s" if duration is not None else "continuous"
+    print(f"collector starting ({mode}); state -> {state_dir}/state.json")
+    try:
+        return asyncio.run(run(address, state_dir, duration=duration))
+    except ImportError:
+        print("bleak is not installed in this environment.", file=sys.stderr)
+        return 2
+    finally:
+        # Released on every exit path, including a signal: without this a
+        # crashed collector would lock out its own replacement.
+        lock.release()
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "plan":
@@ -486,6 +545,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_identity(args.store, args.seconds)
     if args.command == "live":
         return _cmd_live(args.store, args.seconds, args.json, args.save)
+    if args.command == "collect":
+        return _cmd_collect(args.state_dir, args.duration)
     return 2  # pragma: no cover - argparse rejects unknown subcommands first
 
 
