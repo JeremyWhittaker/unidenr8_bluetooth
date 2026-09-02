@@ -133,7 +133,19 @@ class HistoryConfig:
     path: str = "history.db"
     #: Rows older than this are deleted on a periodic sweep.  Zero disables
     #: expiry, which is a choice a person can make and not a default.
+    #:
+    #: This is the *secondary* bound.  It measures against a wall clock, and
+    #: the board this runs on has none worth trusting, so a sweep that would
+    #: remove most of a table is refused rather than performed.  ``max_rows``
+    #: below is what actually bounds the card.
     retain_days: int = 30
+    #: Rows kept per table, deleted lowest-id-first.  This is the bound that
+    #: works: ``rowid`` is monotone and completely immune to the clock, so it
+    #: keeps a card bounded on a vehicle node that never sees NTP -- which is
+    #: the normal state of one.  Zero means unlimited, and hands the whole job
+    #: back to ``retain_days``.  The default is roughly thirty days of
+    #: telemetry at the default sampling interval.
+    max_rows: int = 250_000
     #: Telemetry is recorded at most this often.  The detector sends about one
     #: packet a second; storing every one is 86 400 rows a day of mostly
     #: identical voltage readings, on an SD card.
@@ -287,6 +299,7 @@ _RANGES: Final[dict[tuple[str, str], tuple[float, float]]] = {
     ("collector", "stale_after_seconds"): (1.0, 3600.0),
     ("obd", "interval_seconds"): (1.0, 600.0),
     ("history", "retain_days"): (0, 3650),
+    ("history", "max_rows"): (0, 100_000_000),
     ("history", "telemetry_every_seconds"): (0.0, 3600.0),
     ("gnss", "port"): (1, 65535),
     ("gnss", "stale_after_seconds"): (0.5, 600.0),

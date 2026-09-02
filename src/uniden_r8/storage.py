@@ -106,6 +106,35 @@ OPEN_TIMEOUT_SECONDS: Final[float] = 10.0
 #: reference, and small enough to be exact on any database worth pruning.
 ROBUST_RANK: Final[int] = 10
 
+#: The largest share of a table a single wall-clock sweep may remove before it
+#: refuses and records the refusal instead.
+#:
+#: The rank statistic above buys margin, not safety: eleven rows written under
+#: a wrong clock are enough to move it, and a vehicle node with no network
+#: writes eleven telemetry rows in under two minutes -- or eleven session rows
+#: across six minutes of a systemd restart loop, having recorded nothing at
+#: all.  This is the belt to that pair of braces, and unlike them it cannot be
+#: defeated by any number of poisoned rows: a sweep that wants to take most of
+#: the history is refused whatever its reference says.
+PRUNE_MAX_FRACTION: Final[float] = 0.25
+
+#: ...but only on a table with enough rows for a proportion to mean anything.
+#: Removing one row of two is far past the limit and is also not the mass
+#: deletion this guard exists to stop.  The floor is on the *table*, not on the
+#: number of doomed rows: putting it on the latter would let a restart loop
+#: take nine rows a sweep from a table of any size, which is the slow version
+#: of the same failure.
+PRUNE_MIN_TABLE_ROWS: Final[int] = 20
+
+#: Tables the retention sweep applies to, with the column that dates each row.
+_PRUNABLE: Final[tuple[tuple[str, str], ...]] = (
+    ("alert_events", "wall_ns"),
+    ("alert_snapshots", "wall_ns"),
+    ("telemetry", "wall_ns"),
+    ("gnss_fixes", "wall_ns"),
+    ("sessions", "started_wall_ns"),
+)
+
 _SCHEMA: Final[tuple[str, ...]] = (
     """
     CREATE TABLE IF NOT EXISTS meta (
@@ -458,56 +487,140 @@ class History:
         value = row["newest"] if row else None
         return int(value) if isinstance(value, int) else None
 
-    def prune(self, retain_days: int) -> int:
-        """Delete rows older than *retain_days*.  Returns rows removed.
+    def prune(self, retain_days: int, max_rows: int = 0) -> int:
+        """Bound the database.  Returns rows removed.
 
-        Zero means never expire, and is a decision rather than a default: the
-        configuration says so out loud in :meth:`Config.warnings`.
+        Two mechanisms, and the order matters.
 
-        **The reference instant is neither "now" nor "the newest row".**  This
-        runs on a Pi Zero 2 W, which has no battery-backed clock: at every cold
-        boot the wall clock reads whatever was written at the last shutdown,
-        and it steps by hours when the network appears.  A sweep of the form
+        **A row budget, by insertion order.**  ``max_rows`` keeps at most that
+        many rows per table, deleting the lowest ``id`` first.  ``rowid`` is
+        monotone and completely immune to the clock, so this is the mechanism
+        that actually bounds an SD card -- and it keeps working on a node that
+        never sees NTP, which is the normal state of a vehicle.
+
+        **A retention window, by wall clock.**  ``retain_days`` is a
+        best-effort secondary.  Zero disables it, which is a choice a person
+        can make and not a default; the configuration says so out loud in
+        :meth:`Config.warnings`.
+
+        The wall-clock half is where the danger is, and it has three guards.
+
+        The reference is neither "now" nor "the newest row".  A Pi Zero 2 W has
+        no battery-backed clock, so its wall clock is wrong at every cold boot
+        and steps by hours when the network appears; a sweep of the form
         "delete everything older than now minus thirty days" is a data-
-        destruction trigger on hardware like that -- a clock that briefly reads
-        a date in 2090 deletes the entire history, permanently, with no error.
+        destruction trigger on hardware like that.  Using the newest *row* is
+        no better, because rows written during that window carry the bad stamp.
+        So the reference is ``min(now, the tenth-newest timestamp)``.
 
-        Using the newest *row* instead is better and still not enough: rows
-        written during that bad window carry the bad timestamp, and one of them
-        would then be the newest and do exactly the same damage.
+        That buys margin rather than safety -- eleven poisoned rows would move
+        a rank statistic, and a drive with a wrong clock writes eleven
+        telemetry rows in under two minutes.  So a sweep that would remove more
+        than :data:`PRUNE_MAX_FRACTION` of a table is **refused** and recorded,
+        whatever the reference says.  A retention sweep exists to bound disk
+        usage; one that wants three quarters of the history is not doing that
+        job, and the row budget above will bound the disk anyway.
 
-        So the reference is ``min(now, the tenth-newest timestamp)``.  A clock
-        stuck in the past makes the cutoff early and deletes nothing; a clock
-        jumped into the future is ignored in favour of the data; and a handful
-        of rows written under a wrong clock cannot move a rank statistic.
+        And the outcome is written down.  Every sweep records what it removed,
+        what it refused and what reference it used, into ``meta`` -- because a
+        deletion nobody can see is the half of this failure that no amount of
+        arithmetic fixes.
         """
-        if retain_days <= 0:
-            return 0
-        reference = self.reference_wall_ns()
-        now = time.time_ns()
-        # `min` because a clock in the future must not be believed over the
-        # data, and a clock in the past simply prunes nothing.
-        reference = now if reference is None else min(now, reference)
-        cutoff_ns = reference - retain_days * 86_400 * 1_000_000_000
         removed = 0
+        refused: list[str] = []
         connection = self.connection
-        connection.execute("BEGIN")
-        try:
-            for table in ("alert_events", "alert_snapshots", "telemetry",
-                          "gnss_fixes"):
-                cursor = connection.execute(
-                    f"DELETE FROM {table} WHERE wall_ns < ?", (cutoff_ns,)  # noqa: S608
-                )
-                removed += cursor.rowcount if cursor.rowcount > 0 else 0
-            connection.execute(
-                "DELETE FROM sessions WHERE started_wall_ns < ?", (cutoff_ns,)
-            )
-            connection.execute("COMMIT")
-        except Exception:
-            with contextlib.suppress(Exception):
-                connection.execute("ROLLBACK")
-            raise
+
+        if max_rows > 0:
+            connection.execute("BEGIN")
+            try:
+                for table, _column in _PRUNABLE:
+                    cursor = connection.execute(
+                        f"DELETE FROM {table} WHERE id <= ("  # noqa: S608
+                        f"  SELECT id FROM {table} ORDER BY id DESC "
+                        f"  LIMIT 1 OFFSET ?)",
+                        (max_rows,),
+                    )
+                    removed += max(0, cursor.rowcount)
+                connection.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    connection.execute("ROLLBACK")
+                raise
+
+        reference: int | None = None
+        if retain_days > 0:
+            reference = self.reference_wall_ns()
+            now = time.time_ns()
+            reference = now if reference is None else min(now, reference)
+            cutoff_ns = reference - retain_days * 86_400 * 1_000_000_000
+
+            connection.execute("BEGIN")
+            try:
+                for table, column in _PRUNABLE:
+                    total = int(connection.execute(
+                        f"SELECT COUNT(*) AS n FROM {table}"  # noqa: S608
+                    ).fetchone()["n"])
+                    if not total:
+                        continue
+                    doomed = int(connection.execute(
+                        f"SELECT COUNT(*) AS n FROM {table} "  # noqa: S608
+                        f"WHERE {column} < ?",
+                        (cutoff_ns,),
+                    ).fetchone()["n"])
+                    if (
+                        total >= PRUNE_MIN_TABLE_ROWS
+                        and doomed > total * PRUNE_MAX_FRACTION
+                    ):
+                        refused.append(f"{table}:{doomed}/{total}")
+                        continue
+                    cursor = connection.execute(
+                        f"DELETE FROM {table} WHERE {column} < ?",  # noqa: S608
+                        (cutoff_ns,),
+                    )
+                    removed += max(0, cursor.rowcount)
+                connection.execute("COMMIT")
+            except Exception:
+                with contextlib.suppress(Exception):
+                    connection.execute("ROLLBACK")
+                raise
+
+        self._record_prune(removed, refused, reference)
         return removed
+
+    def _record_prune(
+        self, removed: int, refused: list[str], reference: int | None
+    ) -> None:
+        """Write what the sweep did into ``meta``, so it can be seen."""
+        entries = {
+            "last_prune_at": _iso(time.time_ns()),
+            "last_prune_removed": str(removed),
+            "last_prune_refused": ",".join(refused),
+            "last_prune_reference_ns": "" if reference is None else str(reference),
+        }
+        with contextlib.suppress(Exception):
+            connection = self.connection
+            connection.execute("BEGIN")
+            for key, value in entries.items():
+                connection.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, value),
+                )
+            connection.execute("COMMIT")
+
+    def last_prune(self) -> dict[str, Any]:
+        """What the most recent sweep did.  Empty before the first one."""
+        rows = self.connection.execute(
+            "SELECT key, value FROM meta WHERE key LIKE 'last_prune_%'"
+        ).fetchall()
+        record = {row["key"].removeprefix("last_prune_"): row["value"] for row in rows}
+        if "removed" in record:
+            record["removed"] = int(record["removed"] or 0)
+        if "refused" in record:
+            record["refused"] = [
+                entry for entry in record["refused"].split(",") if entry
+            ]
+        return record
 
     # ----------------------------------------------------------------- read
 
@@ -533,6 +646,7 @@ class History:
             "counts": counts,
             "first_alert_at": span["first"],
             "last_alert_at": span["last"],
+            "last_prune": self.last_prune(),
         }
 
     def encounters(self, limit: int = 50) -> list[dict[str, Any]]:
@@ -597,7 +711,7 @@ class HistoryWriter:
     than no history at all.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - keyword-only retention and opt-in knobs
         self,
         path: str | os.PathLike[str],
         *,
@@ -605,12 +719,16 @@ class HistoryWriter:
         record_motion: bool = False,
         record_coordinates: bool = False,
         record_alert_snapshots: bool = True,
+        max_rows: int = 0,
     ) -> None:
         self.path = Path(path)
         self.retain_days = retain_days
         self.record_motion = record_motion
         self.record_coordinates = record_coordinates
         self.record_alert_snapshots = record_alert_snapshots
+        self.max_rows = max_rows
+        self.pruned = 0
+        self.prune_refused: list[str] = []
         self._queue: queue.Queue[_Write | None] = queue.Queue(maxsize=WRITE_QUEUE_MAX)
         self._thread: threading.Thread | None = None
         self._session_id = 0
@@ -687,6 +805,8 @@ class HistoryWriter:
             "dropped": self.dropped,
             "errors": self.errors,
             "error": self._open_error or "",
+            "pruned": self.pruned,
+            "prune_refused": list(self.prune_refused),
         }
 
     # ---------------------------------------------------------------- write
@@ -808,8 +928,12 @@ class HistoryWriter:
             history.open()
             # Retention first, so the sweep never has to reason about the
             # session it is about to create.
-            if self.retain_days:
-                history.prune(self.retain_days)
+            # The return value is kept, not discarded.  A sweep that removed
+            # thousands of rows -- or one that has been refusing for a week --
+            # must be visible in the published status, because a deletion
+            # nobody can see is the half of this that arithmetic cannot fix.
+            self.pruned = history.prune(self.retain_days, self.max_rows)
+            self.prune_refused = history.last_prune().get("refused", [])
             self._session_id = history.begin_session(
                 started_at=started_at, wall_ns=wall_ns,
                 monotonic_ns=monotonic_ns, adapter=adapter,

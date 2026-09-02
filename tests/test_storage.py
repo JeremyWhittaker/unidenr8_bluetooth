@@ -844,3 +844,124 @@ def test_telemetry_returns_samples_newest_first_and_respects_its_limit(tmp_path)
         assert len(history.telemetry(limit=2)) == 2
         assert len(history.telemetry(limit=0)) == 1
         assert set(samples[0]) >= {"id", "session_id", "at", "voltage", "gps_locked"}
+
+
+# ------------------------------------------------------- retention, bounded
+
+def _bulk(history, table: str, count: int, wall_ns: int, tag: str = "t") -> None:
+    """Insert *count* rows into *table* at one timestamp."""
+    for index in range(count):
+        history.connection.execute(
+            "INSERT INTO alert_events (session_id, seq, kind, track_id, at, "
+            "wall_ns, monotonic_ns, band) VALUES (1, ?, 'alert_end', 1, ?, ?, 1, 'KA')",
+            (index, tag, wall_ns),
+        )
+
+
+def test_the_row_budget_bounds_the_table_without_consulting_a_clock(tmp_path):
+    """The bound that actually protects the card.
+
+    `rowid` is monotone and completely clock-immune, which matters because the
+    board this runs on has no battery-backed clock and a vehicle node often
+    never sees NTP at all. A retention scheme that needs a trustworthy clock
+    is a retention scheme that never runs there.
+    """
+    path = tmp_path / "history.db"
+    with storage.History(path) as history:
+        history.begin_session(
+            started_at=WALL_ISO, wall_ns=WALL_NS, monotonic_ns=MONOTONIC_NS
+        )
+        _bulk(history, "alert_events", 50, WALL_NS)
+
+        # Retention off entirely; only the budget applies.
+        history.prune(0, max_rows=20)
+        rows = history.connection.execute(
+            "SELECT COUNT(*) AS n FROM alert_events"
+        ).fetchone()["n"]
+        assert rows == 20
+
+        # And it keeps the NEWEST, which is what "keep the last N" has to mean.
+        kept = [row["seq"] for row in history.events(limit=100)]
+        assert max(kept) == 49
+        assert min(kept) == 30
+
+
+def test_a_sweep_that_wants_most_of_a_table_is_refused_and_recorded(tmp_path):
+    """The guard the rank statistic cannot provide on its own.
+
+    Eleven rows written under a wrong clock are enough to move a tenth-newest
+    reference, and a vehicle with no network writes eleven telemetry rows in
+    under two minutes. This is the belt: whatever the reference says, a sweep
+    that wants most of the history is not bounding disk usage and is refused.
+    """
+    path = tmp_path / "history.db"
+    real_now = time.time_ns()
+    day = 86_400 * 1_000_000_000
+    bad_clock = real_now + 23_000 * day          # the board briefly reads ~2090
+
+    with storage.History(path) as history:
+        history.begin_session(
+            started_at=WALL_ISO, wall_ns=real_now - 5 * day,
+            monotonic_ns=MONOTONIC_NS,
+        )
+        _bulk(history, "alert_events", 40, real_now - day, tag="real")
+        _bulk(history, "alert_events", 20, bad_clock, tag="bad")
+
+        original = storage.time.time_ns
+        storage.time.time_ns = lambda: bad_clock
+        try:
+            history.prune(30)
+        finally:
+            storage.time.time_ns = original
+
+        survivors = history.connection.execute(
+            "SELECT COUNT(*) AS n FROM alert_events WHERE at = 'real'"
+        ).fetchone()["n"]
+        assert survivors == 40, "a clock excursion destroyed the real history"
+
+        record = history.last_prune()
+        assert any(entry.startswith("alert_events:") for entry in record["refused"]), (
+            "a refusal nobody can see is the half of this arithmetic cannot fix"
+        )
+
+
+def test_a_small_sweep_is_never_refused_by_the_fraction(tmp_path):
+    """A proportion is meaningless on a handful of rows.
+
+    Removing one row of two is far past the fraction and is also not the mass
+    deletion the guard exists to stop.
+    """
+    path = tmp_path / "history.db"
+    with storage.History(path) as history:
+        history.begin_session(
+            started_at=WALL_ISO, wall_ns=WALL_NS, monotonic_ns=MONOTONIC_NS
+        )
+        _bulk(history, "alert_events", 1, ANCIENT_WALL_NS, tag="old")
+        _bulk(history, "alert_events", 1, time.time_ns(), tag="new")
+        assert history.prune(30) >= 1
+        assert history.last_prune()["refused"] == []
+
+
+def test_what_the_sweep_did_is_recorded_and_reported(tmp_path):
+    """A deletion nobody can see is the failure arithmetic cannot fix."""
+    path = tmp_path / "history.db"
+    with storage.History(path) as history:
+        history.begin_session(
+            started_at=WALL_ISO, wall_ns=WALL_NS, monotonic_ns=MONOTONIC_NS
+        )
+        assert history.last_prune() == {}, "nothing before the first sweep"
+        history.prune(30)
+        record = history.last_prune()
+        assert set(record) == {"at", "removed", "refused", "reference_ns"}
+        assert history.stats()["last_prune"] == record
+
+
+def test_the_writer_publishes_what_its_startup_sweep_did(tmp_path):
+    """The collector republishes this; it used to be discarded on the floor."""
+    writer = _started_writer(tmp_path / "history.db", retain_days=30, max_rows=10)
+    try:
+        status = writer.status()
+        assert "pruned" in status
+        assert status["prune_refused"] == []
+    finally:
+        writer.stop()

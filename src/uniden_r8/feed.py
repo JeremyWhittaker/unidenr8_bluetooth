@@ -161,7 +161,10 @@ function paint(d){
 function logRow(e){
   const a=e.alert||{},tb=$("log");
   const tr=tb.insertRow(0);
-  const when=new Date(Number(e.wall_ns/1000000n||0)).toLocaleTimeString();
+  // Plain arithmetic. wall_ns arrives as a JSON number, and mixing it with a
+  // BigInt literal throws a TypeError on every single alert frame, which
+  // killed the whole event log the moment anything was detected.
+  const when=new Date((e.wall_ns||0)/1e6).toLocaleTimeString();
   tr.innerHTML="<td>"+when+"</td><td>"+e.kind.replace("alert_","")+"</td><td>"+
     (a.band||"")+"</td><td>"+(a.direction||"")+"</td><td>"+
     (a.strength_1_to_8||"")+"</td><td>"+

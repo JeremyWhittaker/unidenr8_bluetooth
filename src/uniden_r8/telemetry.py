@@ -57,6 +57,7 @@ into a partial reading.
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from dataclasses import dataclass, field
 from typing import Any, Final
@@ -285,10 +286,20 @@ def _at(parts: list[str], index: int) -> str | None:
 
 
 def _float(value: str | None) -> float | None:
+    """Parse a decimal, rejecting the ones that are not numbers.
+
+    ``float()`` accepts ``"nan"``, ``"inf"`` and ``"infinity"``, and Python's
+    ``json`` module then writes them out as the bare tokens ``NaN`` and
+    ``Infinity`` -- which are not JSON.  One such value anywhere in a packet
+    would make *every* document this project publishes unparseable to a
+    conforming reader, from the state file to the broker, for as long as the
+    detector kept sending it.  A field that cannot be a number is unknown.
+    """
     try:
-        return float(value)  # type: ignore[arg-type]
+        parsed = float(value)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+    return parsed if math.isfinite(parsed) else None
 
 
 def _int(value: str | None) -> int | None:
@@ -806,13 +817,22 @@ class AlertSnapshot:
 
     @property
     def uncertain(self) -> bool:
-        """True when at least one slot arrived and could not be read.
+        """True when this notification could not be fully read.
 
         The tracker uses this to hold open tracks rather than ending them:
         absence and failure are different facts and must not produce the same
         behaviour.
+
+        Derived from :attr:`recognised` rather than from the rejected count,
+        because there is a third way to fail that has no rejected slot at all.
+        An empty payload, or one that is only NUL bytes -- a truncated
+        notification, which is exactly what a marginal link produces -- decodes
+        to no slots and no rejections, and under the old form that read as a
+        confident "nothing is being detected".  It would have ended every live
+        track: one truncated packet mid-encounter, and the alert disappears
+        from the state file, the feed and the history with a fabricated end.
         """
-        return self.rejected_slots > 0
+        return not self.recognised
 
     def __iter__(self):
         return iter(self.alerts)

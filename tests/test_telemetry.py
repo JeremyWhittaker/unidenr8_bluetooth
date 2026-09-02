@@ -550,3 +550,65 @@ def test_an_unlisted_mute_code_keeps_the_detection_but_not_the_string():
     )
     assert hostile and hostile[0].mute_code is None, "no device string is kept"
     assert "passwd" not in repr(hostile[0].detailed())
+
+
+def test_a_non_finite_value_never_reaches_a_published_document():
+    """`float()` accepts "nan" and "inf"; JSON does not.
+
+    Python's json module writes them out as the bare tokens NaN and Infinity,
+    which are not JSON. One such value anywhere in one packet would make every
+    document this project publishes unparseable to a conforming reader — the
+    state file, the broker, the feed — for as long as the detector kept sending
+    it. A field that cannot be a number is unknown.
+    """
+    import json
+
+    for payload in (b"nan&0&0&0&12&D&D", b"inf&0&0&0&12&D&D",
+                    b"-Infinity&0&0&0&12&D&D"):
+        reading = telemetry.parse_telemetry(payload)
+        assert reading.voltage is None, payload
+        rendered = json.dumps(reading.detailed())
+        assert "NaN" not in rendered and "Infinity" not in rendered
+        json.loads(rendered)          # would raise on a non-finite token
+
+    alert = telemetry.parse_alerts(b"1,00,KA,3,33,nan,R,1&0&0&0")
+    assert alert and alert[0].frequency_ghz is None, "the detection survives"
+    json.loads(json.dumps(alert[0].detailed()))
+
+
+def test_an_empty_alert_notification_is_not_read_as_all_clear():
+    """A truncated packet is what a marginal link produces.
+
+    An empty or NUL-only payload decodes to no slots and no rejections, so
+    under a rejected-count test it read as a confident "nothing is being
+    detected" — which ends every live track. One truncated packet mid-encounter
+    would have made the alert disappear with a fabricated end in the history.
+    """
+    for payload in (b"", b"\x00", b"   ", b"\x00\x00\x00"):
+        snapshot = telemetry.parse_alert_snapshot(payload)
+        assert snapshot.recognised is False, payload
+        assert snapshot.uncertain is True, payload
+
+    # And a genuine all-clear is still a confident statement.
+    clear = telemetry.parse_alert_snapshot(CLEAR_PACKET)
+    assert clear.recognised is True
+    assert clear.uncertain is False
+    assert clear.alerts == []
+
+
+def test_a_truncated_packet_holds_a_live_track_open():
+    """The behaviour the flag exists to produce, end to end."""
+    from uniden_r8 import events
+
+    tracker = events.AlertTracker()
+    live = telemetry.parse_alerts(ALERT_PACKET)
+    tracker.observe(live, seq=1, monotonic_ns=1_000, wall_ns=1_000)
+    assert len(tracker) == 1
+
+    for seq in (2, 3, 4):
+        truncated = telemetry.parse_alert_snapshot(b"")
+        tracker.observe(
+            truncated.alerts, seq=seq, monotonic_ns=seq * 1_000,
+            wall_ns=seq * 1_000, hold_open=truncated.uncertain,
+        )
+    assert len(tracker) == 1, "a truncated packet ended a live threat"

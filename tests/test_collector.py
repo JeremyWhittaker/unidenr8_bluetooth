@@ -854,3 +854,42 @@ def test_the_instance_lock_is_the_same_lock_from_two_directories(tmp_path):
     assert first.path == second.path
     with first, pytest.raises(collector.InstanceBusy):
         second.acquire()
+
+
+def test_a_reconnecting_session_gets_its_own_silence_window(tmp_path):
+    """The silence watchdog must not charge a session for the previous one.
+
+    `state.latest_at` deliberately outlives the session that set it — it is what
+    the published documents age their reading against. Measuring silence from it
+    alone meant that after any silence teardown, every subsequent session was
+    killed before a packet could arrive, forever. The commonest way a session
+    ends is that very timeout, so the failure is self-reinforcing.
+    """
+    state = collector.CollectorState()
+    # A packet from a previous session, long enough ago to be past the window.
+    state.record_telemetry(
+        __import__("uniden_r8.telemetry", fromlist=["x"]).parse_telemetry(TELEMETRY),
+        now=0.0,
+    )
+    stale_age = collector.SILENCE_TIMEOUT_SECONDS * 10
+    assert state.age_seconds(stale_age) > collector.SILENCE_TIMEOUT_SECONDS
+
+    # A session starting now has received nothing, and must still be inside its
+    # window: max(streaming_since, latest_at) is what the pump measures from.
+    streaming_since = stale_age
+    silent_for = stale_age - max(streaming_since, state.latest_at or 0.0)
+    assert silent_for <= collector.SILENCE_TIMEOUT_SECONDS
+
+    # And a session that has genuinely gone quiet is still torn down.
+    later = stale_age + collector.SILENCE_TIMEOUT_SECONDS + 1
+    assert later - max(streaming_since, state.latest_at or 0.0) > \
+        collector.SILENCE_TIMEOUT_SECONDS
+
+
+def test_the_dashboard_does_not_mix_a_bigint_with_a_number():
+    """It threw a TypeError on every alert frame, killing the whole event log."""
+    from uniden_r8.feed import INDEX_HTML
+
+    assert "n)" not in INDEX_HTML.split("wall_ns")[1][:40], "BigInt literal"
+    assert "1000000n" not in INDEX_HTML
+    assert "(e.wall_ns||0)/1e6" in INDEX_HTML

@@ -834,6 +834,7 @@ class Sinks:
                 record_motion=cfg.history.record_detector_motion,
                 record_coordinates=cfg.gnss.record_coordinates,
                 record_alert_snapshots=cfg.history.record_alert_snapshots,
+                max_rows=cfg.history.max_rows,
             )
             # Opening waits on the writer thread, which is waiting on the
             # card.  A slow or failing open must not hold the loop either.
@@ -1241,7 +1242,22 @@ class _Session:
     async def _pump(self, client: Any) -> None:
         """The streaming loop: wake on a packet, publish on a transition."""
         state = self.state
-        last_health = time.monotonic()
+        # Packets can only start arriving now, so this is where the silence
+        # window opens.
+        #
+        # It has to be a local, and that is the whole subtlety.
+        # ``state.latest_at`` deliberately outlives the session that set it --
+        # it is what the published documents age their reading against, and
+        # nulling it would republish the previous session's voltage as fresh,
+        # which is the one thing this program must never do.  But using it
+        # alone would charge a brand-new session for the *previous* one's
+        # silence: since the commonest way a session ends is this very
+        # timeout, every reconnect after the first would be killed before a
+        # packet could arrive, forever.  Taking the later of the two also
+        # stops the session being charged for its own connect and setup, which
+        # can legitimately take most of a minute.
+        streaming_since = time.monotonic()
+        last_health = streaming_since
         last_publish = 0.0
         heartbeat = self.config.collector.heartbeat_seconds
 
@@ -1298,8 +1314,13 @@ class _Session:
             # is the failure mode a reconnect exists for, and nothing else
             # detects it: the OBD gate is green, the client is "connected", and
             # the state file freezes on a reading that is quietly hours old.
-            age = state.age_seconds(now)
-            if age is not None and age > SILENCE_TIMEOUT_SECONDS:
+            #
+            # Measured from whichever is later: this session starting to
+            # stream, or the last packet actually received.  A session that has
+            # never received a single packet is covered by the first, which the
+            # earlier "age is not None" form was not -- it streamed forever.
+            silent_for = now - max(streaming_since, state.latest_at or 0.0)
+            if silent_for > SILENCE_TIMEOUT_SECONDS:
                 state.note = "no packets"
                 return
 

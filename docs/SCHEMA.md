@@ -1502,22 +1502,38 @@ it off, the rows carry fix quality, speed and course and no position at all.
 
 ### Retention
 
-`history.retain_days`, default 30. On writer start, rows in `alert_events`,
-`alert_snapshots`, `telemetry` and `gnss_fixes` with `wall_ns` older than the
-cutoff are deleted,
-along with `sessions` rows older than the cutoff. Zero disables expiry
-entirely, and `Config.warnings()` says so out loud because it is a decision
-rather than a default.
+Two mechanisms, and the order matters.
 
-The sweep runs **once, at writer start**, not on a timer. A collector that runs
-for a month without restarting does not prune during that month.
+**A row budget, by insertion order.** `history.max_rows` (default 250 000) keeps
+at most that many rows per table, deleting the lowest `id` first. `rowid` is
+monotone and completely immune to the clock, so this is the mechanism that
+actually bounds an SD card — and it keeps working on a node that never sees NTP,
+which is the normal state of a vehicle.
 
-Retention is driven by the wall clock, which is the one place this project
-cannot use the monotonic clock — a retention window has to mean calendar days.
-On a node whose clock jumps at boot, a sweep can therefore delete more or less
-than intended. It is a diagnostic history, not a system of record.
+**A retention window, by wall clock.** `history.retain_days` (default 30) is a
+best-effort secondary. Zero disables it, and `Config.warnings()` says so out loud
+because it is a decision rather than a default.
 
----
+The wall-clock half is where the danger is, and it has three guards.
+
+1. **The reference is neither "now" nor "the newest row".** A Pi Zero 2 W has no
+   battery-backed clock: it is wrong at every cold boot and steps by hours when
+   the network appears, so "delete everything older than now minus thirty days"
+   is a data-destruction trigger. Using the newest *row* is no better, because
+   rows written during that window carry the bad stamp. The reference is
+   `min(now, the tenth-newest timestamp)` — a rank statistic a few outliers
+   cannot move.
+2. **A sweep that would remove more than a quarter of a table is refused.** The
+   rank statistic buys margin, not safety: eleven poisoned rows would move it,
+   and a drive with a wrong clock writes eleven telemetry rows in under two
+   minutes. So the fraction is checked unconditionally on any table of at least
+   twenty rows, whatever the reference says.
+3. **The outcome is written down.** Every sweep records `last_prune_at`,
+   `last_prune_removed`, `last_prune_refused` and `last_prune_reference_ns` into
+   `meta`; `History.stats()` returns them as `last_prune`, and the collector
+   republishes `pruned` and `prune_refused` in `sinks.history`. A mass deletion
+   nobody can see is the half of this failure that no amount of arithmetic
+   fixes.
 
 ## Writing a consumer
 

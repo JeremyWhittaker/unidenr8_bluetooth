@@ -212,6 +212,7 @@ streaming loop wakes, so its real granularity is bounded below by
 | `enabled` | bool | `false` | — | Open the database and record sessions, alert transitions, throttled telemetry. |
 | `path` | string | `"history.db"` | — | Database file. A relative path resolves against `collector.state_dir`; an absolute path is used as given. |
 | `retain_days` | int | `30` | 0–3650 | Rows older than this are deleted. `0` disables expiry entirely. |
+| `max_rows` | int | `250000` | 0–100000000 | Rows kept per table, deleted lowest-id-first. **This is the bound that actually protects the card**: `rowid` is monotone and clock-immune, so it keeps working on a vehicle node that never sees NTP — which is the normal state of one. Zero means unlimited and hands the whole job to `retain_days`. |
 | `telemetry_every_seconds` | float | `10.0` | 0.0–3600 | Minimum spacing between stored telemetry rows. `0` stores every packet. |
 | `record_detector_motion` | bool | `false` | — | Store the detector's own heading, speed and altitude in the `telemetry` table. Off means those three columns are written `NULL`. |
 | `record_alert_snapshots` | bool | `true` | — | Store each alert notification verbatim in the `alert_snapshots` table. On by default, unlike the two opt-ins above, because an alert packet carries no position — and because it is what makes the derived alert tracks re-derivable by a better matcher later. |
