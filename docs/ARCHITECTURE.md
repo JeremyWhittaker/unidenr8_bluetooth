@@ -256,15 +256,18 @@ Every one of these is a condition a vehicle will actually produce.
 | Failure | What happens |
 |---|---|
 | Detector switched off | Connect fails, `session failed` is noted with no exception text, backoff with jitter, retry. |
-| Link drops mid-session | Detected on the next loop iteration; every open alert track is ended at the last moment it was seen; the link is released; reconnect. |
+| Link drops mid-session | Detected on the next loop iteration; every open alert track is ended at the last moment it was seen; the alerts and open tracks are cleared so nothing stays latched; the link is released; reconnect. |
+| Link stays "connected" but stops speaking | After `SILENCE_TIMEOUT_SECONDS` with no packet the session is torn down for a retry. Nothing else detects this: the OBD gate is green and the client reports connected, so the state file would otherwise freeze on a reading that is quietly hours old. |
+| A GATT read or subscribe never returns | Each is bounded by `SETUP_TIMEOUT_SECONDS`, including the unsubscribe on the teardown path. bleak's own timeout covers connecting and not these, and continuous mode has no outer deadline. |
 | OBD link unhealthy | `obd-blocked` published, link released promptly, backoff. Not an error in this project — it is the gate doing its job. |
-| SD card full or read-only | The history writer's thread counts errors and keeps going; `sinks.history.healthy` goes false; the collector keeps reading the detector. |
+| SD card full or read-only | Publishing counts a failure and continues; the history writer's thread counts errors, `sinks.history.healthy` goes false, and the collector keeps reading the detector. `publish_failures` is in the schema-2 document. |
 | Power cut mid-write | SQLite WAL with `synchronous=NORMAL` cannot corrupt the database; the last few transactions may be lost. That trade is deliberate. |
-| Broker unreachable | `MqttPublisher` counts an error and returns. Nothing propagates. |
+| Broker unreachable | The connect runs on a thread so it cannot hold the loop; `MqttPublisher` counts an error and returns. Nothing propagates. |
 | `gpsd` unplugged | The client reconnects with backoff; `fix` goes `None` once the last fix is stale; alerts are still recorded, without a position. |
-| Two collectors started | The second refuses on the `flock` rather than silently stealing the link. |
-| Clock steps hours (no RTC) | Durations and staleness come from the monotonic clock and are unaffected. Wall-clock stamps are for display only. |
+| Two collectors started | The second refuses on the `flock`. The lock path is resolved, so two processes started from different working directories mean the same lock. |
+| Clock steps hours (no RTC) | Durations and staleness come from the monotonic clock and are unaffected. Wall-clock stamps are for display only — and retention measures against the tenth-newest row rather than "now", so neither a wrong clock nor a handful of rows written under one can delete the history. |
 | Queue overflow | Oldest records drop, a `Gap` records exactly which, counters rise, the note says so. |
+| SIGTERM during a quiet period | The pump races the notification event against the stop event, so shutdown is immediate rather than waiting for the next packet or heartbeat. |
 
 The rule underneath all of them: **an optional sink can never stop the collector reading the
 detector.** Radar data is the product; everything else is a consumer of it.

@@ -1214,8 +1214,15 @@ class _Session:
                 await self._pump(client)
             finally:
                 for permitted in subscribed:
+                    # Bounded like the setup calls, and for the same reason:
+                    # this is the teardown path, so an unsubscribe that never
+                    # returns would hold the link open forever *while trying to
+                    # release it*, which is the worst place to be unbounded.
                     with contextlib.suppress(Exception):
-                        await client.stop_notify(permitted)
+                        await asyncio.wait_for(
+                            client.stop_notify(permitted),
+                            timeout=SETUP_TIMEOUT_SECONDS,
+                        )
                 # Whatever arrived before teardown is still worth having, and
                 # any threat still open when the link goes away must be ended
                 # rather than left live in the history forever.

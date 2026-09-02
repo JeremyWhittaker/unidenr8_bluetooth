@@ -465,7 +465,49 @@ evidence about the protocol, the hardware, or the vehicle.
 | Settings block layout | still unknown. `inspect` snapshots it; nothing decodes it. |
 | OBD coexistence under active polling | still **not established**. §8's two limits stand. |
 
-### Three defects this build found in its own new code
+### Defects this build found in its own new code
+
+Recorded because "the tests passed" is a weaker statement than "these were
+caught", and because every one of them would have been invisible in production.
+Twenty-six in total: five found by writing the tests, five by writing the
+configuration reference against the code, three by writing the schema
+reference, and thirteen by an adversarial review across concurrency,
+correctness, privacy and failure handling.
+
+The five that would have mattered most in a vehicle:
+
+1. **A live alert stayed latched after the detector went away.** The last
+   snapshot remained in the state file, the feed and the broker indefinitely,
+   so a detector switched off mid-alert left a Ka warning showing forever. For
+   this program that is the worst possible stale value: a stale threat reads
+   exactly like a live one.
+2. **The retention sweep could have deleted the whole history.** It cut on
+   ``time.time_ns() - retain_days``, on a board with no battery-backed clock
+   whose wall clock steps by hours when the network appears. Measuring against
+   the newest row was not enough either — rows written during that window carry
+   the bad stamp and one of them becomes the newest. It measures against the
+   tenth-newest now, which a handful of outliers cannot move.
+3. **Publishing did synchronous disk work on the event loop** — two JSON
+   writes, two ``chmod`` calls and two renames on an SD card, on the loop
+   holding the BLE subscription, on every transition. On BlueZ that does not
+   cost latency; a client that will not drain its D-Bus socket is disconnected.
+4. **Continuous mode had no ceiling on a stalled GATT call**, and no way to
+   notice a link that BlueZ still called connected but that had stopped
+   speaking. Either would have held the detector's link and the vehicle's radio
+   indefinitely with the state file frozen.
+5. **The SQLite ``-wal`` sidecar took the process umask.** SQLite creates it
+   lazily at the first write, long after the umask was closed around
+   ``connect()``. It holds the most recently written rows, so a ``0600``
+   database with a group-readable journal beside it was not a private history.
+
+And one that is worth recording for its shape rather than its severity: **a new
+alert track was charged a miss on its own first snapshot**, because the
+claimed-track set was computed before any track was started. That halved the
+miss tolerance and made a single dropped packet split one threat into two — a
+one-line bug in a derivation nobody could have checked against hardware,
+because the hardware has never produced an alert.
+
+### The first three, in the original wording
 
 Recorded because "the tests passed" is a weaker statement than "the tests caught
 these", and because each of the three would have been invisible in production.
