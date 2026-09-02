@@ -47,13 +47,13 @@ are not limitations of this code — no public evidence shows the BLE interface 
 |---|---|---|
 | BLE discovery and pairing | **Verified** | Bounded scan, sanitized output; guarded `bluetoothctl` bond, left untrusted and disconnected. |
 | Model, firmware and database version | **Verified** | Standard Device Information reads. No vendor command. |
-| Live telemetry stream | **Verified** | ~1.0 s cadence; 324 of 324 packets parsed across two hardware runs. |
+| Live telemetry stream | **Verified** | ~1.0 s cadence; 508 of 508 packets parsed across four hardware runs, the most recent on this build. |
 | Voltage | **Verified** | Published as a number. |
 | GPS fix state | **Verified** | Tri-state: locked, no fix, unknown. |
-| Detector heading, speed, altitude | **Decoded; units unvalidated** | Present in every packet; upstream reads them as compass point / mph / feet. Never measured against a moving vehicle here. |
-| Latitude and longitude from the detector | **Not available** | Not in the live stream. Use `gpsd`; the schema keeps the two sources apart. |
+| Detector heading, speed, altitude | **Decoded; units unvalidated** | Read on real hardware: the heading is a compass point, the speed reads 0 while parked, and the altitude's magnitude fits feet rather than metres. The units still need a moving capture. |
+| Latitude and longitude from the detector | **Not available — now measured, not assumed** | The GPS sub-group's first field reads a compass point on this R8, so it is not a coordinate pair. A tripwire in the parser fires if that ever changes. Use `gpsd`; the schema keeps the two sources apart. |
 | Coordinates from an external GNSS receiver | **Implemented; opt-in** | `gpsd` TPV/SKY, with fix quality and error estimates. Off by default. |
-| Clear / no-alert state | **Verified** | Observed on this R8. |
+| Clear / no-alert state | **Verified** | `0&0&0&0` on this R8 — four slots, all empty. |
 | Band, strength, frequency, direction, mute | **Implemented; field validation pending** | Decoded from the R8w protocol. No real detection captured on this unit yet. |
 | Laser gun identification | **Implemented; never seen** | The 0–19 table is decompiled from the app and unverified on any hardware. |
 | Multiple simultaneous threats | **Implemented** | Every slot is preserved; the tracker follows each independently. |

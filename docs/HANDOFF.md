@@ -19,18 +19,27 @@ MQTT broker and a live web dashboard. It has no write path to the detector at al
 decoding, the collector's session management, OBD-gated startup and teardown, and coexistence with
 an *idle* OBD link over five minutes. The numbers are in [`EVIDENCE.md`](EVIDENCE.md) §§6–8.
 
-**Written, tested against fakes, never run against a detector.** Everything added in this build: the
-event path, the alert tracker, the SQLite history, the `gpsd` client, the MQTT publisher, the local
-feed, the settings/POI inspection command, and the schema-2 document. 630 tests pass with no radio,
-no broker, no `gpsd` and no network. That proves the code does what it was written to do. It does
-not prove the *protocol* is what upstream says it is.
+**Run against the detector, on the target hardware.** The event path, the full decoder, the schema-2
+document, the SQLite history and the collector were exercised on the Pi with the detector powered and
+the vehicle's RFCOMM link bound: 184 packets across three windows, 0 unparsed, 0 dropped, 0 gaps,
+loop lag peaking at 2.6 ms, and every OBD invariant unchanged. `EVIDENCE.md` §10 has the numbers.
+Untested on hardware: the `gpsd` client (no receiver attached), MQTT (no broker), the local feed, and
+the `inspect` command — which reads saved coordinates and needs its own explicit decision.
+
+640 tests pass with no radio, no broker, no `gpsd` and no network. That proves the code does what it
+was written to do. It does not prove the *protocol* is what upstream says it is.
 
 **Not proven, and the honest gap.** No real radar detection has ever been captured from this
 detector. Every field of an active alert — band, strength, frequency, direction, mute state — is
 decoded from a protocol documented on an **R8w**, a different product. The only alert packet this R8
-has ever sent is all-clear. Likewise the detector's heading, speed and altitude are decoded but
-their *units* have no source in this project at all: upstream reads them as compass point, mph and
-feet, and nobody here has checked that against a moving vehicle.
+has ever sent is `0&0&0&0`. Likewise the heading and speed are now read from real packets, but from a
+*stationary* vehicle, so their units and their latency are still upstream's reading rather than a
+measurement.
+
+One claim did get stronger. "The live telemetry carries no latitude or longitude" used to rest
+entirely on upstream's naming of four fields nobody here had looked at — and a 4-tuple is exactly the
+right width to be lat, lon, altitude and status. Those fields have now been read on this R8, and the
+first is a compass point. See `EVIDENCE.md` §10.8.
 
 [`VALIDATION.md`](VALIDATION.md) is the queue of hardware work that would change this. It is a
 checklist meant to be used standing at the vehicle.

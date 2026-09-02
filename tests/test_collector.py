@@ -601,7 +601,13 @@ def test_the_detailed_document_is_owner_only_and_git_ignored(tmp_path):
     assert detail.stat().st_mode & 0o777 == FILE_MODE
     assert detail.parent.stat().st_mode & 0o777 == DIR_MODE
 
+    # The permission half holds anywhere.  The ignore half needs a checkout,
+    # and the deployed tree on the node is a plain directory -- the same reason
+    # test_repo_hygiene.py guards its git checks.  Skipping there rather than
+    # failing keeps the node's own test run meaningful.
     repo = Path(__file__).resolve().parent.parent
+    if not (repo / ".git").exists():
+        pytest.skip("not a git checkout; the ignore rule is asserted in CI")
     for candidate in (".state/state-v2.json", ".state/history.db"):
         assert subprocess.run(
             ["git", "-C", str(repo), "check-ignore", "-q", candidate], check=False

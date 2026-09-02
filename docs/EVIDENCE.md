@@ -539,3 +539,103 @@ described and ended up ordered after records that arrived later than the loss.
 it — a K-band capture from a lawful passive source such as an automatic-door
 opener — is ten minutes of work that would promote nine fields from UPSTREAM to
 OBSERVED.
+
+---
+
+## 10. The expansion build, on hardware
+
+2026-09-02, from about 22:14 UTC. The detector was powered and parked; the
+OBDLink was bound and idle throughout. This is the first time any of §9's code
+met the detector, and it closes several gaps §9 listed as open.
+
+### The session
+
+| # | Observation | Grade |
+|---|---|---|
+| 10.1 | The rewritten receive path connects to the existing bond and streams. One 30 s window took **29 telemetry packets**, a 40 s window **40**, and a 120 s collector trial **115** — 184 packets, **0 unparsed**, 0 reconnects. | OBSERVED |
+| 10.2 | Inter-packet interval over 39 consecutive notifications: **min 0.994 s, median 1.013 s, max 1.031 s**. Consistent with §7.2's 0.97–1.02 s. | OBSERVED |
+| 10.3 | Every packet had **exactly 7 fields** and, when a fix was present, a **4-part GPS sub-group** — 13 distinct payloads across the capture, all the same shape. Shape graded `confirmed-7`. | OBSERVED |
+| 10.4 | Battery 13.4 V with the vehicle running, GPS locked, status letter `C`. | OBSERVED |
+
+### The GPS sub-group, looked at for the first time
+
+§7 recorded that this project parsed sub-fields 0–2 nowhere. It parses them now,
+and this is the first evidence about what they contain on an **R8**.
+
+| # | Observation | Grade |
+|---|---|---|
+| 10.5 | Sub-field 0 read **`NE`** — one of the eight compass points. Upstream's reading of it as a heading holds on this model. | OBSERVED |
+| 10.6 | Sub-field 1 read **`0`** with the vehicle stationary. Consistent with a speed, though zero is zero in any unit; the units remain unvalidated until §11. | OBSERVED (value), UPSTREAM (unit) |
+| 10.7 | Sub-field 2 decoded as an integer whose magnitude is **consistent with upstream's reading of feet and inconsistent with metres** at this location. The value itself is position-adjacent and stays in the private capture. | OBSERVED (shape), strongly supports UPSTREAM (unit) |
+| 10.8 | **The coordinate tripwire did not fire.** `_parse_gps_group` flags the group if sub-fields 0 and 1 both read as signed decimals in coordinate range; sub-field 0 is a two-letter compass point, so the test fails at the first field. | OBSERVED |
+
+10.8 is the one worth dwelling on. Until now, "the live telemetry carries no
+latitude or longitude" rested entirely on upstream's *naming* of four fields
+nobody here had looked at — and a 4-tuple is exactly the right width to be
+latitude, longitude, altitude and status. It has now been looked at on this R8,
+and sub-field 0 is a compass point. The claim is no longer inherited; it is
+measured. It remains measured on **one unit, parked, with a fix** — a moving
+capture (§11, `docs/VALIDATION.md` V1) is still what would confirm the units.
+
+### Two fields that differ from the R8w
+
+| # | Observation | Grade |
+|---|---|---|
+| 10.9 | Telemetry fields 5 and 6 read **`N`** and **`N`** on this R8. Upstream's R8w reads `D` and `D` in the same positions. | OBSERVED |
+| 10.10 | Field 4 read a small changing integer (`13` in the capture). Field 3 read `0` throughout. | OBSERVED |
+
+10.9 is a third established difference between the models, after the advertised
+name (§6.2) and the `BTM10`/`ATTOWAVE` identity strings (§6). It is also why
+this project publishes fields 3–6 under neutral names: upstream calls field 5
+"wifi status", Uniden's product page says the R8 has no Wi-Fi (§1.2), and the
+non-W unit reads a different character there than the Wi-Fi model does. What `N`
+means is not established. It is recorded, not interpreted.
+
+### The all-clear packet, finally recorded
+
+| # | Observation | Grade |
+|---|---|---|
+| 10.11 | The alert characteristic returned **`0&0&0&0`** — 7 bytes, **exactly four slots, every one empty**. | OBSERVED |
+
+§7.6 and §8.6 recorded that an all-clear packet was returned but never what it
+looked like. Four slots is now observed on this R8, which matches the four-slot
+structure upstream describes and the manual's "up to four simultaneous threats".
+No alert notification arrived in any window; nothing was detected.
+
+### The new code, on the target hardware
+
+A 120-second collector trial with the OBD guard armed and the SQLite history
+enabled, sampling the OBDLink every 5 s throughout.
+
+| # | Observation | Grade |
+|---|---|---|
+| 10.12 | 115 telemetry packets, **0 unparsed, 0 dropped, 0 gaps, 0 lost notifications**; ingest queue high-water **2** of 256. | OBSERVED |
+| 10.13 | **Loop lag: 0.6 ms current, 2.6 ms maximum**, alarm not raised. The "nothing slow on the event loop" invariant holds on a Pi Zero 2 W with the OBD probe, the SQLite writer and the state writes all in flight. | OBSERVED |
+| 10.14 | Telemetry interval p95 **1.031 s** against the 0.97–1.02 s baseline — no sign of radio contention with the bound RFCOMM link. | OBSERVED |
+| 10.15 | History wrote 13 rows with 0 dropped and 0 errors; `publish_failures` 0; retention swept and refused nothing. | OBSERVED |
+| 10.16 | **All 26 OBD samples**: unit active, one binding, `hci0` RX/TX errors 0. Before and after: `rfcomm0:` bound on channel 1, `/dev/rfcomm0` mode 660 root:dialout, 0 failed units, controller powered and not discovering, both bonds intact. | OBSERVED |
+| 10.17 | The **single-instance lock** refused a second collector while a first held the link, with the intended message. | OBSERVED |
+| 10.18 | An **abrupt kill** — SIGHUP with no clean shutdown, the power-cut case this module is designed for — left an uncheckpointed 247 KiB WAL. The next open recovered it: the session, 14 telemetry rows and 1 alert snapshot were all intact. | OBSERVED |
+| 10.19 | The database and **both WAL sidecars** were `0600` in a `0700` directory throughout, including immediately after the abrupt kill. This is the fix from §9 confirmed on hardware rather than in a test. | OBSERVED |
+
+### What this run did *not* establish
+
+**No active alert.** The vehicle was parked at a residence with no radar source
+present, so every field of an active alert — band, strength, raw signal, the
+frequency-versus-gun-identifier split, direction, mute — remains **UPSTREAM**,
+exactly as it was. That is still the largest gap in the project and
+`docs/VALIDATION.md` V2 is still the cheapest way to close it.
+
+**No motion.** Speed and heading were read from a stationary vehicle, so the
+units, the latency and the behaviour of the fix through a turn or a grade are
+untested. V1 remains open.
+
+**No POI, settings or descriptor read.** `inspect` was not run: it reads the
+detector's saved camera locations and user marks, and "test it" is not the
+explicit decision that command exists to require.
+
+**No drive, and no active OBD polling.** `hummer-collector` is disabled, so the
+RFCOMM link was bound and idle. §8's two limits stand unchanged, and V10 — one
+to two hours of coexistence under real polling — is still the gate before the
+service is enabled at boot.
+
