@@ -464,6 +464,65 @@ relative to *the newest row in the database*, not relative to the wall clock —
 the Pi has no battery-backed clock, and a clock that briefly reads a far-future
 date would otherwise delete the whole history.
 
+### Adding real coordinates
+
+**The detector does not send any.** That is now measured rather than assumed:
+the GPS sub-group's first field reads a compass point on this R8, not a
+latitude (`docs/EVIDENCE.md` §10.8). What the detector gives you is a fix
+status, an eight-point heading, a speed and an altitude — useful, and not a
+position.
+
+For latitude and longitude you attach a receiver to the Pi. The client is
+written and tested; there is simply nothing for it to read yet.
+
+```bash
+# On the node, with a USB GNSS receiver plugged in.
+sudo apt update && sudo apt install -y gpsd gpsd-clients
+ls /dev/ttyACM* /dev/ttyUSB*          # the receiver should appear here
+```
+
+Point `gpsd` at whichever device appeared, in `/etc/default/gpsd`:
+
+```
+DEVICES="/dev/ttyACM0"
+GPSD_OPTIONS="-n"
+START_DAEMON="true"
+```
+
+```bash
+sudo systemctl enable --now gpsd
+cgps -s                                # a fix should appear within a minute or two
+```
+
+Then switch it on for the collector:
+
+```toml
+[gnss]
+enabled = true
+host = "127.0.0.1"
+port = 2947
+record_coordinates = false     # start here; see below
+```
+
+**Leave `record_coordinates` off to begin with.** With it off the client still
+connects, still reports fix mode, satellite count, speed and course, and still
+lets an alert record whether there was a valid fix when it fired — without ever
+writing down where the vehicle was. That is the genuinely useful middle
+setting, and it is enough to validate the detector's own speed and heading
+against a trusted source, which is `docs/VALIDATION.md` V1.
+
+Turn it on only when you actually want a location-tagged history, and read
+`docs/SAFETY.md` §3 first: coordinates reach `state-v2.json` and the history,
+both `0600` in a `0700` git-ignored directory, and `Config.warnings()` says so
+out loud every time the collector starts.
+
+Any receiver `gpsd` supports will do — a u-blox USB puck is the usual choice.
+A phone feeding `gpsd` over the local network works too, and so does an
+existing vehicle GPS if something already publishes it. What this project will
+not do is invent a coordinate: anything from a receiver lands in
+`vehicle_gnss`, never in `detector_gps`, so a later reader can always tell
+which source said what.
+
 ### Turning on a live display or a broker
 
 Both are off by default and both add sustained radio load. **Do not enable
