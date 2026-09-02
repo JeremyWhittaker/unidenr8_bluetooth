@@ -7,6 +7,7 @@ with duration and peak strength. A local SQLite history you can query. MQTT with
 discovery. A live web dashboard. And **no way to write anything to the detector** — not a disabled
 path, an absent one.
 
+[![CI](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-640-brightgreen.svg)](tests/)
