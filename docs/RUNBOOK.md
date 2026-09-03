@@ -667,6 +667,28 @@ for you; it manages exactly one unit.
 venv, the configuration, the state directory and the history database are left
 alone — it stops a service, it does not delete anybody's data.
 
+### After a drive
+
+```bash
+./scripts/drive-report.sh            # the session that just ended
+./scripts/drive-report.sh --all      # every session in the database
+```
+
+Reads the local history and nothing else — no radio, no detector, no network.
+It answers the three questions worth asking, in order: did anything get captured
+and was any of it unparsed; did a real alert arrive, with its raw text; and did
+the detector's own motion fields actually get written down.
+
+That last one is not a formality. With `record_detector_motion` off the
+collector runs perfectly, publishes a healthy state document, and writes
+heading, speed and altitude as NULL on every row — so a drive undertaken to
+validate exactly those fields comes back unable to answer. The report says
+`MOTION FIELDS *** NOT RECORDED ***` rather than printing an empty column.
+
+If a non-all-clear alert packet was captured, it is printed verbatim and called
+out, because that is the evidence this project has never had. The raw text is
+stored losslessly, so it stands whether or not the parser read it correctly.
+
 ## Step 7 — stop
 
 The `live` and `inspect` paths run once and exit. The collector can run

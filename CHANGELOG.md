@@ -76,6 +76,14 @@ schema it reads exactly. See [`docs/SCHEMA.md`](docs/SCHEMA.md).
 - A test that only passed on a machine which had never run the tool (`history` resolved the default
   database against the process working directory).
 
+### Added, for reading a drive back
+
+- **`scripts/drive-report.sh`.** Summarises what a session actually captured,
+  from the local history alone. Flags the failure that has been silent before —
+  motion fields not recorded — rather than printing an empty column, prints any
+  POI warning text, and calls out a non-all-clear alert packet verbatim, since
+  that is the evidence this project has never had.
+
 ### Fixed after the first real install
 
 The first `install-service.sh` run on the vehicle found three defects in the
