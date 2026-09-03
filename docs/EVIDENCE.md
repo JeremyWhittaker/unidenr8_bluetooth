@@ -946,3 +946,99 @@ available.
 decoder, the ingest queue, the history writer and the 1 Hz throttle all held up
 on a moving vehicle for the first time, on the target hardware, with the OBD
 link bound.
+
+---
+
+## 13. The detector gives up a coordinate
+
+2026-09-03, parked, engine running, detector reporting a fix
+(`gps_locked: true`, 13.5 V). The collector was stopped so nothing else held
+the link. **The first non-empty POI database read reported on any R-series
+detector.**
+
+The operator short-pressed the physical **MARK** button once. Nothing was
+written to the detector: this project has no application-write path, and the
+command characteristic is on a permanent denylist. `inspect --confirm` was then
+run once.
+
+### 13.1 The POI record layout is 13 / 12 / 10 — OBSERVED
+
+```
+POI blob: 23 bytes
+
+  whole-record         13/12/10   records=2  exact=True   consumed=23/23
+  payload-plus-header  15/14/12   records=1  exact=False  stopped at offset 15
+
+  offset   0  type 0x01  speed camera   13 bytes  decodes to a legal coordinate
+  offset  13  type 0x03  user mark      10 bytes  decodes to a legal coordinate
+```
+
+Twenty-three bytes is 13 + 10 exactly, and `whole-record` accounts for every
+one of them. The competing reading this project had been carrying —
+`payload-plus-header`, its own +2 arithmetic on the same upstream numbers —
+desynchronises at offset 15 and cannot account for the blob.
+
+| Layout | Lengths | Grade before | Grade now |
+|---|---|---|---|
+| `whole-record` | 13 / 12 / 10 | UPSTREAM-UNVERIFIED | **OBSERVED** |
+| `payload-plus-header` | 15 / 14 / 12 | INFERENCE | **REFUTED** |
+
+§11.7 said one capture would settle it either way. It did, on the first one.
+
+The refuted layout is kept in `CANDIDATE_LAYOUTS` rather than deleted. A tool
+that can only walk one layout cannot report that the layout is wrong, and the
+next firmware — or an R8w — may not match this one.
+
+### 13.2 The detector materialises the coordinate from its own fix — OBSERVED
+
+The type-03 record appeared because a button was pressed on the detector's own
+keypad. **No position was supplied to it**, by this project or by anything else:
+no BLE command was sent, and the only traffic was a GATT read.
+
+It decodes, under the confirmed layout, to a coordinate that is finite, inside
+the legal latitude and longitude ranges, and not the zero-zero value an empty or
+padded record produces.
+
+That closes a question this project has restated four times, and the answer is
+narrower and better than either extreme:
+
+* **Live telemetry carries no coordinate.** Unchanged, and measured harder than
+  ever — §12 added 2,636 packets from a moving vehicle with the tripwire silent.
+* **The detector will nonetheless give you one, on demand.** It knows where it
+  is, it will write that down when asked by its own keypad, and the record is
+  readable over BLE with no write path of any kind.
+
+### 13.3 What this does *not* establish
+
+**That the coordinate is the vehicle's position**, to any accuracy. The record
+decodes to *a* legal coordinate. Proving it is *this* location needs a reference
+fix supplied privately by the operator, which `uniden-r8 poi-diff
+--reference-file` reports as a distance in metres and never as a value. Not yet
+done.
+
+**That the transaction is reversible.** The deletion half of the test — press
+MARK again, re-read, confirm the blob returns to 13 bytes with only the speed
+camera left — had not been run when this was written. Until it has, nothing here
+should be built into an automated add/read/delete loop; user marks are
+persistent detector state.
+
+**Anything about a write path.** None was used and none is proposed. The
+experiment works precisely because the detector's own button does the writing.
+
+### 13.4 Two other first observations from the same capture
+
+**Settings 1 is 240 bytes with real structure** — 25 distinct byte values, the
+most common (`0xff`) accounting for 34%. Upstream described roughly 200 opaque
+bytes on an R8w. It is not uniform, so it is carrying configuration, and the
+one-toggle-at-a-time diff in `VALIDATION.md` V9 now has a real baseline to diff
+against.
+
+**Settings 2 is 240 bytes of `0xff`, entirely uniform** — one distinct byte
+value across the whole block. That matches upstream's R8w exactly, and on this
+detector it means the block is unused, unwritten, or not yet populated.
+
+The device's own `0x2901` descriptors name the three attributes `Data_1`,
+`Data_2` and `Data_3` — the detector offers no more meaning than that.
+
+**No byte of any of these blocks is recorded here or anywhere outside the
+owner-only private store.**

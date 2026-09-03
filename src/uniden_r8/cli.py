@@ -219,6 +219,21 @@ def build_parser() -> argparse.ArgumentParser:
              "locations and user marks",
     )
 
+    survey_parser = sub.add_parser(
+        "survey",
+        help="enumerate every attribute the detector exposes; reads no "
+             "characteristic value, so no --confirm is needed",
+    )
+    survey_parser.add_argument(
+        "--listen", type=float, default=0.0, metavar="SECONDS",
+        help="also subscribe to the command-response characteristic for this "
+             "long and record anything it says unprompted. Sends nothing. "
+             "Clamped to 5-120 s because the radio is shared with the vehicle.",
+    )
+    survey_parser.add_argument(
+        "--json", action="store_true", help="emit the survey as JSON"
+    )
+
     poi_diff_parser = sub.add_parser(
         "poi-diff",
         help="compare two POI captures from the private store; no radio, "
@@ -715,6 +730,36 @@ def _cmd_inspect(store_path: str, confirmed: bool, settings) -> int:
     return 0 if result.compatible else 1
 
 
+def _cmd_survey(store_path: str, listen: float, as_json: bool) -> int:
+    """Walk the detector's own GATT tree and report what is actually there.
+
+    Every other read path works from a catalogue of attributes documented on a
+    *different product*. This asks the device instead, which is the only way to
+    find an attribute nobody knew to look for.
+    """
+    from .pairing import PairingRefused, bonded_detector_address
+    from .survey import survey
+
+    store = PrivateStore(store_path).ensure()
+    try:
+        address = bonded_detector_address()
+    except (LookupError, PairingRefused) as exc:
+        print(publish(str(exc)), file=sys.stderr)
+        return 1
+
+    try:
+        result = asyncio.run(survey(address, store, listen_seconds=listen))
+    except ImportError:
+        print("bleak is not installed in this environment.", file=sys.stderr)
+        return 2
+
+    if as_json:
+        print(publish(json.dumps(result.as_dict(), indent=2)))
+    else:
+        print(publish(result.render()))
+    return 0 if result.connected else 1
+
+
 def _cmd_poi_diff(store_path: str, before: str, after: str,
                   reference_file: str | None, as_json: bool) -> int:
     """Compare two POI captures already in the private store.
@@ -925,6 +970,8 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - one per comma
         return _cmd_collect(args.state_dir, args.duration, settings)
     if args.command == "inspect":
         return _cmd_inspect(args.store, args.confirm, settings)
+    if args.command == "survey":
+        return _cmd_survey(args.store, args.listen, args.json)
     if args.command == "poi-diff":
         return _cmd_poi_diff(
             args.store, args.before, args.after,

@@ -23,9 +23,11 @@ floats at offsets 2 and 6.  The second reading is what a field-by-field count
 of Uniden's own app produces, and it is self-consistent: 1 + 1 + 4 + 4 + 2 + 1
 = 13 for a speed camera, 12 without the speed byte, 10 for a bare user mark.
 
-Neither reading has been checked against a populated database on any detector,
-so this module does not pick one.  It evaluates every candidate layout against
-the bytes and reports which of them -- if any -- consumes the blob exactly.
+One of them has now been checked against a populated database on this
+detector, and won: see ``docs/EVIDENCE.md`` §13.  This module still evaluates
+every candidate against the bytes rather than assuming the winner, because a
+tool that can only walk one layout cannot report that the layout is wrong --
+and the next firmware, or the R8w, may not match.
 That is a measurement; picking one and writing a parser would be a guess whose
 output is coordinates: home, work, the roads Jeremy drives.  A wrong address
 printed confidently is worse than no address.  So this reports lengths, byte
@@ -95,17 +97,25 @@ SESSION_CEILING_SECONDS: Final[float] = 90.0
 #: because nobody has read a populated POI database on any detector and a swap
 #: would destroy the record of the disagreement rather than settle it.
 #:
-#: ``whole-record`` reads upstream's 13/12/10 as the total record length,
-#: which is what a field-by-field count of Uniden's own app produces:
+#: **Settled by measurement on 2026-09-03.**  A populated POI database was read
+#: on this non-W R8 at firmware 1.43 -- 23 bytes, the first non-empty POI read
+#: anybody has reported on any model -- and ``whole-record`` consumed it exactly,
+#: 23 of 23 bytes, as a 13-byte speed camera followed by a 10-byte user mark.
+#: ``payload-plus-header`` desynchronised at offset 15.  ``docs/EVIDENCE.md`` §13.
+#:
+#: ``whole-record`` reads upstream's 13/12/10 as the total record length, which
+#: is what a field-by-field count of Uniden's own app produces:
 #: type(1) + unknown(1) + lat f32(4) + lon f32(4) + angle u16(2) + speed(1).
-#: Graded UPSTREAM-UNVERIFIED -- upstream's published numbers, never tested.
+#: **OBSERVED on this detector.**
 #:
-#: ``payload-plus-header`` reads the same numbers as the payload *after* a type
-#: byte and an unknown byte, giving 15/14/12.  Graded INFERENCE: it is this
-#: project's own reading, and it is the one a single capture can refute.
+#: ``payload-plus-header`` read the same numbers as the payload *after* a type
+#: byte and an unknown byte, giving 15/14/12.  It was this project's own
+#: reading, and it is now **REFUTED** by that capture.
 #:
-#: ``docs/EVIDENCE.md`` §11 carries both grades.  One populated capture decides
-#: it: see :func:`evaluate_layouts`.
+#: The loser is kept rather than deleted.  It is what makes
+#: :func:`evaluate_layouts` a measurement instead of an assertion: a tool that
+#: can only walk one layout cannot report that the layout is wrong, and the next
+#: firmware or model may not match this one.
 CANDIDATE_LAYOUTS: Final[dict[str, dict[int, tuple[str, int]]]] = {
     "whole-record": {
         1: ("speed camera", 13),
@@ -119,10 +129,10 @@ CANDIDATE_LAYOUTS: Final[dict[str, dict[int, tuple[str, int]]]] = {
     },
 }
 
-#: Retained under its original name so an existing caller keeps working.  It is
-#: one of two hypotheses, not the blessed one.
+#: Retained under its original name so an existing caller keeps working, and now
+#: pointing at the layout the hardware confirmed rather than the one it refuted.
 CANDIDATE_RECORD_LENGTHS: Final[dict[int, tuple[str, int]]] = CANDIDATE_LAYOUTS[
-    "payload-plus-header"
+    "whole-record"
 ]
 
 

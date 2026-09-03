@@ -77,6 +77,8 @@ __all__ = [
     "assert_live_readable",
     "assert_live_notifiable",
     "assert_inspect_readable",
+    "assert_survey_notifiable",
+    "SURVEY_LISTEN_UUIDS",
     "KNOWN_WRITE_COMMANDS",
     "WriteRefused",
     "UnknownCharacteristic",
@@ -329,6 +331,23 @@ NOTIFY_UUIDS: Final[frozenset[str]] = frozenset(
 #: Never touched, by any operation, whatever else changes.
 FORBIDDEN_UUIDS: Final[frozenset[str]] = frozenset({COMMAND_WRITE_UUID})
 
+#: The one characteristic `survey --listen` may subscribe to, and nothing else.
+#:
+#: The command-response characteristic is excluded from :data:`READABLE_UUIDS`
+#: and :data:`NOTIFY_UUIDS` because it was judged pointless without a command to
+#: respond to -- and this project sends no commands. That reasoning has a hole
+#: in it: "pointless" was an assumption, never a measurement. A detector may
+#: report state on it unprompted -- a boot banner, a mode change, an
+#: acknowledgement of something the *user* did on the keypad -- and if it does,
+#: that is a data source nobody here has looked at, obtainable without sending
+#: anything.
+#:
+#: So this is a deliberately separate set rather than a relaxation of the two
+#: above. Subscribing writes a CCCD descriptor, which is what "receive BLE data"
+#: means and cannot carry an application command; the forbidden-UUID check still
+#: runs first; and no path other than the survey may use it.
+SURVEY_LISTEN_UUIDS: Final[frozenset[str]] = frozenset({COMMAND_RESPONSE_UUID})
+
 #: The identity question, answered with GATT reads only.  Ordered so that the
 #: model answer -- the thing that decides whether the rest of the upstream
 #: table applies at all -- arrives first.
@@ -431,6 +450,24 @@ DESCRIPTOR_READ_PLAN: Final[tuple[str, ...]] = (
 #: Jeremy drives.  Anything read from one of these goes to the private store as
 #: raw bytes and is never summarised into published output.
 SENSITIVE_UUIDS: Final[frozenset[str]] = frozenset({POI_UUID})
+
+
+def assert_survey_notifiable(uuid: str) -> str:
+    """Permit a subscription only to the command-response characteristic.
+
+    Its own gate, checked at its own call site, so the survey cannot listen to
+    anything else and no other code path can reach this allowance. The forbidden
+    check runs first and is unconditional, as everywhere else.
+    """
+    permitted = normalize_uuid(uuid)
+    if permitted in FORBIDDEN_UUIDS:
+        raise WriteRefused(f"{permitted} is permanently forbidden")
+    if permitted not in SURVEY_LISTEN_UUIDS:
+        raise WriteRefused(
+            f"{permitted} is not the command-response characteristic; the "
+            f"survey may not subscribe to it"
+        )
+    return permitted
 
 
 def assert_inspect_readable(uuid: str) -> str:

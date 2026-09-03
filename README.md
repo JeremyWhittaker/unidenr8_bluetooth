@@ -10,7 +10,7 @@ path, an absent one.
 [![CI](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-701-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-729-brightgreen.svg)](tests/)
 [![No write path](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
 
 ![The bundled dashboard: voltage, detector GPS, link status and packet counts across the top; a live
@@ -61,7 +61,7 @@ alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             
 | Voltage, GPS fix state | **Verified** — the status letter decoded by correlation over a full cold start: `C` is a fix, `D` is not |
 | Detector heading, speed, altitude | **Captured moving** — 2,636 packets, 0 unparsed, all 8 headings. Speed is mph (driver-corroborated); altitude is refuted as metres |
 | Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
-| Coordinates *stored* by the detector | **Open question.** It can save a user mark from its own fix, and that record is readable. Untested here — see [below](#the-coordinate-question). |
+| Coordinates *stored* by the detector | **Yes, and confirmed on hardware.** One press of the detector's own MARK button writes a coordinate it derived from its own fix; the record reads back over BLE with no write path. [How that was established.](docs/EVIDENCE.md) |
 | Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
 | Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
 | SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
@@ -128,19 +128,33 @@ current location — the command carries no coordinates, so the detector must be
 its own fix — and that record is then readable from the POI characteristic. If that works on this
 model, one button press yields one detector-derived coordinate.
 
-Nobody has checked. This project has never read a populated POI database, on any detector, so:
+**That has now been checked, and it works.** On 2026-09-03 a populated POI
+database was read from this detector — 23 bytes, the first non-empty POI read
+reported on any R-series unit. One press of the physical MARK button had added a
+10-byte type-03 record, and it decodes to a legal coordinate the detector
+derived from its own fix. Nothing was written to the detector; the only traffic
+was a GATT read.
 
-- there is **no POI parser here**, deliberately. A parser that can appear to succeed on a structure
-  nobody has seen populated would manufacture coordinates that somebody would believe, and its
-  output is where people live.
-- what there *is* is `inspection.evaluate_layouts()`, which runs **every** candidate record layout
-  against the bytes and reports which one consumes the blob exactly. Two layouts are on file, one
-  from upstream's numbers read as whole records and one read as payloads, and they are separately
-  graded. One capture settles it, in either direction, and the tool says which.
+It also settled the record layout by measurement rather than by argument. Two
+competing readings of upstream's numbers were on file; `whole-record` (13/12/10)
+consumed the blob exactly, 23 of 23 bytes, and `payload-plus-header` (15/14/12)
+desynchronised at offset 15 and is refuted.
 
-The experiment is written up in [`docs/VALIDATION.md`](docs/VALIDATION.md) (V8). It needs no write
-path: park, read the POI blob, press the physical MARK button once, read again, diff. Everything
-stays in the owner-only private store.
+The design that made that possible is worth stating, because it is the whole
+approach:
+
+- there is still **no POI parser here**, deliberately. A parser that decodes and prints coordinates
+  is a different thing from a tool that reports structure, and its output is where people live.
+- what there *is* is `inspection.evaluate_layouts()`, which runs **every** candidate layout against
+  the bytes and reports which one consumes the blob exactly. The refuted layout is kept, because a
+  tool that can only walk one layout cannot report that the layout is wrong — and the next firmware,
+  or an R8w, may not match.
+- `uniden-r8 poi-diff` compares two captures and will report the distance between a decoded point
+  and a reference fix you supply in a file. It reports metres. It never prints a coordinate.
+
+The experiment is in [`docs/VALIDATION.md`](docs/VALIDATION.md) (V8) and needs no write path: park,
+read the POI blob, press MARK once, read again, diff. Everything stays in the owner-only private
+store.
 
 For continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss` branch that is
 never merged with the detector's own fields, and it is off by default.

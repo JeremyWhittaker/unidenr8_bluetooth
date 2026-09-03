@@ -135,6 +135,11 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     the latter two also write a CCCD to subscribe. None of them writes a value
     to a vendor characteristic, which is the invariant.
 
+    `survey` connects and enumerates, but reads no characteristic *value* --
+    not one -- so it cannot return a saved coordinate and needs no `--confirm`.
+    Its `--listen` subscribes to the command-response characteristic and sends
+    nothing.
+
     `history`, `config` and `poi-diff` touch no radio at all -- `poi-diff`
     compares two captures that already exist on disk, which is the whole reason
     the coordinate experiment needs no write path.
@@ -147,7 +152,7 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     assert actions, "expected a subcommand action"
     assert set(actions[0].choices) == {
         "plan", "selftest", "scan", "pair", "identity", "live", "collect",
-        "inspect", "history", "config", "poi-diff",
+        "inspect", "history", "config", "poi-diff", "survey",
     }
 
 
