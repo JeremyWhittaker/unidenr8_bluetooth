@@ -891,10 +891,20 @@ That shape is a commute — surface streets, then sustained higher speed. Read a
 mph the fast cluster is an ordinary freeway. Read as km/h it is 40–52 mph
 sustained, which is possible but does not fit the shape as well.
 
-**This is not yet evidence.** What would settle it in one sentence is the
-driver's own recollection of the trip's top speed, or a single reference GNSS
-run. Until then the field is published as `speed_raw` with
-`"speed_unit": "unknown (upstream reads it as mph)"`, exactly as before.
+**The driver confirmed it.** Presented with the distribution and the two
+readings — an ordinary freeway commute under mph, or 52 mph sustained under
+km/h — he identified the mph reading as matching the drive he had just taken.
+
+So the field is **mph**, and it is published as such. The grade is deliberately
+"corroborated, not instrumented": this is one operator's account of one trip
+agreeing with the shape of the data, which is a great deal better than
+inheriting a number from an R8w and a great deal worse than a reference GNSS
+run alongside. `speed_unit` now reads
+`"mph (corroborated on one drive, not instrumented)"`, which is the whole claim.
+
+A reference run remains the thing that would make it exact, and it would also
+give the *lag* — how far behind the detector's reading trails a real speed
+change — which nothing so far touches at all.
 
 ### 12.4 The wall clock stepped 104 minutes mid-session — OBSERVED
 

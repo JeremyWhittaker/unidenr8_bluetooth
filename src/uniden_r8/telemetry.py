@@ -156,10 +156,20 @@ FIELD_CONFIDENCE: Final[dict[str, str]] = {
     "shape": "observed",
     "detector_gps.present": "observed",
     "detector_gps.status_raw": "observed",
-    "detector_gps.locked": "candidate",
-    "detector_gps.direction_8": "upstream",
-    "detector_gps.speed_raw": "upstream",
-    "detector_gps.altitude_raw": "upstream",
+    # `locked` is now a measurement: one cold start produced E -> D -> C, and
+    # the heading field was present in exactly the 2454 rows whose status was C
+    # and none of the 182 that were not.  `docs/EVIDENCE.md` §12.1.
+    "detector_gps.locked": "observed",
+    # Eight of eight compass points seen on one drive, varying with the route.
+    "detector_gps.direction_8": "observed",
+    # The *field* is observed and its unit is not instrumented.  The reading
+    # matched the driver's own account of the drive -- a bimodal distribution
+    # peaking at 83 with 403 samples at 65 and above -- which is corroboration,
+    # not a comparison against a reference.  §12.3.
+    "detector_gps.speed_raw": "observed",
+    # Metres is refuted: 1116 mean against a route whose elevation is nowhere
+    # near 3700 ft.  Feet is upstream's reading, now consistent with data.  §12.2
+    "detector_gps.altitude_raw": "observed",
     "poi_warning.active": "observed",
     "poi_warning.raw": "observed",
     "poi_warning.decoded": "candidate",
@@ -473,9 +483,9 @@ class DetectorGps:
             "status_raw": self.status_raw,
             "direction_8": self.direction_8,
             "speed_raw": self.speed_raw,
-            "speed_unit": "unknown (upstream reads it as mph)",
+            "speed_unit": "mph (corroborated on one drive, not instrumented)",
             "altitude_raw": self.altitude_raw,
-            "altitude_unit": "unknown (upstream reads it as feet)",
+            "altitude_unit": "feet (metres refuted by measurement)",
             "suspect_coordinate_pair": self.suspect_pair,
         }
 

@@ -58,8 +58,10 @@ That commute closed more than it looks. 2,636 packets in motion, 0 unparsed, all
 eight compass headings, and the GPS status letter decoded by correlation rather
 than by reading upstream: `C` is a fix and `D` is no fix, measured across 2,454
 rows of perfect agreement between the letter and whether a heading was present.
-Altitude is now *refuted* as metres. What it did not close is speed, which needs
-one reference run or one recollection of a top speed, and the alert path, which
+Altitude is now *refuted* as metres, and speed is mph -- corroborated by the
+driver's own account of the trip rather than by an instrument, which is better
+than inheriting a number from an R8w and worse than a reference run, and is
+graded as exactly that. What the drive did not close is the alert path, which
 saw fifty minutes of motion and nothing to detect.
 
 What did change is that the first real alert is now much more likely to survive contact with the
