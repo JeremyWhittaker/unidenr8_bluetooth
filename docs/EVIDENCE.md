@@ -1305,3 +1305,88 @@ No coordinate was written to any file, any document, or this repository. The
 publication gate still refuses positions, the repository hygiene scan still
 looks for them in every committable file, and this section records that the
 decode was correct without recording what it decoded.
+
+---
+
+## 15. The command-response characteristic, and a reversible transaction
+
+Same session, same standalone-script-outside-the-package method as §14. Two
+experiments: an add-then-delete round trip, and a retry of the delete after the
+first attempt failed.
+
+### 15.1 The response characteristic speaks — OBSERVED
+
+`5987b4ef-…` was excluded from every allowlist in this project as "readable, but
+pointless without a command", which was an assumption. It is not pointless. It
+reports, promptly and in plain ASCII:
+
+| Emitted | Meaning |
+|---|---|
+| `RDrespACK` | the command was accepted |
+| `RDrptUMRK:1=1` | user-mark add, status 1 |
+| `RDrptUMRK:0=1,42057F9F,C2DF7DC1` | user-mark delete, status 1, echoing the record |
+| `RDrptUMRK:0=3,4206708F,02F07EF1` | user-mark delete, **status 3**, echoing garbage |
+
+`=1` accompanied every operation that worked and `=3` the one that did not, so
+the digit after `=` is a status rather than a count. Two observations of each is
+not a decoded vocabulary, and no other status value has been seen.
+
+Every value the detector emits is **uppercase hex**. That detail turned out to
+matter.
+
+### 15.2 The targeted delete works — but only with uppercase hex — OBSERVED
+
+The delete was sent in the coordinate-targeted form, built from the four-byte
+float encodings of a record the script had created moments earlier:
+
+```
+BTreqUMRK:0,<lat hex>,<lon hex>
+```
+
+**Lowercase failed.** `BTreqUMRK:0,42057f9f,c2df7dc1` was acknowledged, and then
+reported back as `RDrptUMRK:0=3,4206708F,02F07EF1`. Decoding what came back:
+the latitude is `33.609921` where `33.374630` was sent — a quarter of a degree
+out — and the longitude is `3.5e-37`, which is not a coordinate at all. The blob
+did not change and the mark stayed.
+
+**Uppercase succeeded.** The identical command with `42057F9F,C2DF7DC1` returned
+`RDrptUMRK:0=1,42057F9F,C2DF7DC1` — the values echoed back unchanged — and the
+POI blob went from 20 bytes to 10, exactly one 10-byte user-mark record removed.
+
+So the detector's hex parse is case-sensitive, it does not reject a lowercase
+argument, and it acts on whatever it mis-parses instead. **A lowercase delete is
+not a no-op — it is a delete aimed at a coordinate nobody chose.** In this case
+it matched nothing. That is luck, not design.
+
+### 15.3 The transaction is reversible — OBSERVED
+
+```
+before   10 bytes, 1 record
+add      20 bytes, 2 records     BTreqUMRK:1        -> RDrespACK, RDrptUMRK:1=1
+delete   10 bytes, 1 record      BTreqUMRK:0,LAT,LON -> RDrespACK, RDrptUMRK:0=1
+```
+
+The record set returned to exactly what it was, and the operator's own remaining
+mark was untouched throughout. Both writes targeted only bytes the script itself
+had created.
+
+This closes the question §13.8 and §13.13 left open. A user mark can be added and
+removed programmatically, verifiably, without touching the detector.
+
+### 15.4 What is still not established
+
+**The bare `BTreqUMRK:0`.** Documented as removing the *current or nearby* mark,
+never sent here, and deliberately so: it selects a record this project did not
+create. The targeted form is strictly safer and there is no reason to prefer the
+other.
+
+**Deleting anything but a user mark.** `BTreqRLCD:0` — red-light-camera
+deletion — has not been sent and is not going to be on a database the operator
+did not build.
+
+**The "delete all" long-press.** No BLE equivalent is documented, and a command
+whose name would mean *delete every saved location* is not something to arrive at
+by guessing. It stays untested.
+
+**Whether repeated add/delete cycles are safe.** One cycle has been run. Marks
+are flash-backed, and nothing here establishes an endurance limit.

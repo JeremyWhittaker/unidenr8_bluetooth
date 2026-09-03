@@ -349,6 +349,26 @@ seen populated does not get a parser that can appear to succeed. Schema 1
 publishes a bare boolean, `poi_warning`, and never the detail — a warning's
 type and distance describe where the vehicle is.
 
+### 3.5b The command-response characteristic
+
+`5987b4ef-…` was long treated as "readable, but pointless without a command".
+It is not. When a command is written it replies in plain ASCII, promptly:
+
+| Emitted | Grade | Meaning |
+|---|---|---|
+| `RDrespACK` | OBSERVED | the command was accepted |
+| `RDrptUMRK:1=<status>` | OBSERVED | user-mark add |
+| `RDrptUMRK:0=<status>,<lat hex>,<lon hex>` | OBSERVED | user-mark delete, echoing the record it acted on |
+
+`1` accompanied every operation that worked and `3` the one that did not. Two
+samples each; treat the digit as a status and nothing finer.
+
+**Hex arguments must be uppercase.** The detector's parse is case-sensitive and
+it does *not* reject a lowercase argument — it acts on the mis-parsed value. A
+lowercase delete is therefore not a no-op but a delete aimed at a coordinate
+nobody chose. `docs/EVIDENCE.md` §15.2 has the measurement, including what the
+mis-parse decoded to.
+
 ### 3.6 Why fields 3–6 are published under neutral names
 
 Upstream names these four fields `warning`, `scanCount`, `wifi status` and
