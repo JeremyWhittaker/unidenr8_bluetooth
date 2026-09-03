@@ -6,6 +6,7 @@ into a commit.  These tests check the repository itself, not the code.
 
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 
@@ -217,3 +218,65 @@ def test_the_coordinate_scan_actually_catches_one():
     longitude = f"{-(112.0 + 0.0740):.4f}"
     assert looks_like_position(f"the fix came back {latitude}, {longitude} at 04:12Z")
     assert not looks_like_position("324 of 324 packets, 0 unparsed, 2.6 ms")
+
+
+#: Shell scripts shipped in this repository.
+SHELL_SCRIPTS = sorted((REPO_ROOT / "scripts").glob("*.sh"))
+
+#: A pipeline whose reader exits early, under `set -o pipefail`.
+#:
+#: `grep -q` and `head` stop reading at the first match or line. The writer then
+#: dies of SIGPIPE with status 141, and `pipefail` makes that the pipeline's
+#: status -- so the pipeline reports *failure on success*. Every occurrence of
+#: this pattern in this repository has been a real bug, twice in the same week:
+#: an installer that reported a present systemd unit as missing, and an
+#: uninstaller that refused to uninstall anything on exactly the nodes where the
+#: unit existed. Both were found on hardware rather than by reading.
+_EARLY_EXIT_READER = re.compile(r"\|\s*(grep\s+-[a-zA-Z]*q|head\b)")
+
+
+@pytest.mark.parametrize("path", SHELL_SCRIPTS, ids=lambda p: p.name)
+def test_no_script_pipes_into_an_early_exiting_reader_under_pipefail(path):
+    """`cmd | grep -q` reports failure on a *match* when pipefail is set.
+
+    The consequence is not a crash, which is why it survives review: the script
+    runs to completion and quietly takes the wrong branch. Use `grep -c` (which
+    reads to EOF), or ask the tool for the one thing directly, or drop the pipe.
+    """
+    text = path.read_text(encoding="utf-8")
+    if "pipefail" not in text:
+        return
+    offenders = [
+        f"{path.name}:{number}: {line.strip()}"
+        for number, line in enumerate(text.splitlines(), start=1)
+        if _EARLY_EXIT_READER.search(line) and not line.lstrip().startswith("#")
+    ]
+    assert not offenders, (
+        "a pipe into an early-exiting reader under `set -o pipefail` reports "
+        "failure when it matches:\n  " + "\n  ".join(offenders)
+    )
+
+
+def test_the_pipefail_scan_actually_catches_one():
+    """A control that cannot fail proves nothing.
+
+    Demonstrates the pattern above is detected, so the test is not passing
+    merely because the regex never matches anything.
+    """
+    assert _EARLY_EXIT_READER.search('systemctl list-unit-files | grep -q "^x"')
+    assert _EARLY_EXIT_READER.search("ps -ef | head -1")
+    assert not _EARLY_EXIT_READER.search('grep -q "x" somefile.txt')
+    assert not _EARLY_EXIT_READER.search("systemctl list-unit-files | grep -c .")
+
+
+def test_the_shipped_scripts_are_syntactically_valid():
+    """`bash -n` every script, so a typo cannot reach a vehicle.
+
+    These run on a node in a truck, usually with sudo, often when something is
+    already wrong. A syntax error found there is found at the worst moment.
+    """
+    for path in SHELL_SCRIPTS:
+        result = subprocess.run(
+            ["bash", "-n", str(path)], capture_output=True, text=True, check=False
+        )
+        assert result.returncode == 0, f"{path.name}: {result.stderr.strip()}"

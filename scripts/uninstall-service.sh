@@ -10,7 +10,14 @@ set -euo pipefail
 UNIT_NAME="unidenr8-collector.service"
 UNIT_DEST="/etc/systemd/system/${UNIT_NAME}"
 
-if ! systemctl list-unit-files 2>/dev/null | grep -q "^${UNIT_NAME}"; then
+# `grep -c`, not `grep -q`, and that is the whole point.  Under
+# `set -o pipefail` a pipe into `grep -q` reports *failure on a match*: grep
+# exits at its first hit, the writer dies of SIGPIPE with 141, and the pipeline
+# takes that status.  This script read that as "not installed" and exited 0
+# without uninstalling anything -- on exactly the nodes where the unit was
+# present.  `grep -c` reads to end of input, so nothing is ever sent SIGPIPE.
+# Asking systemd about the one unit by name also keeps the match exact.
+if ! systemctl list-unit-files "$UNIT_NAME" --no-legend 2>/dev/null | grep -c . >/dev/null; then
     echo "not installed; nothing to do"
     exit 0
 fi
