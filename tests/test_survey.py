@@ -679,3 +679,30 @@ def test_a_listen_value_above_the_maximum_is_clamped_down(tmp_path, monkeypatch)
     client = FakeClient()
     _survey(_store(tmp_path), RecordingFactory(client), listen_seconds=10_000.0)
     assert sleep_calls == [survey.MAX_LISTEN_SECONDS]
+
+
+def test_the_vendor_services_are_named_rather_than_reported_as_unknown():
+    """Services are named from `discovery.KNOWN_SERVICES`, not the catalogue.
+
+    `gatt.describe` is keyed by *characteristic* and raises for every service
+    UUID, including the two vendor services this project depends on. Labelling
+    services through it reported every service as "not in this project's
+    catalogue" -- which turned the one signal this command exists to produce,
+    "here is something nobody knew about", into noise that fires on everything.
+    """
+    from uniden_r8.survey import _service_name
+
+    assert _service_name(gatt.DATA_SERVICE_UUID) == "uniden-data"
+    assert _service_name(gatt.COMMAND_SERVICE_UUID) == "uniden-command"
+    assert _service_name(gatt.DEVICE_INFORMATION_SERVICE_UUID) == "device-information"
+
+
+def test_a_service_this_project_has_never_heard_of_is_still_reported_unknown():
+    """The companion: naming known services must not name everything.
+
+    Without this, a fix that returned a label for any input would pass the test
+    above and destroy the same signal it was written to protect.
+    """
+    from uniden_r8.survey import _service_name
+
+    assert _service_name("0000dead-0000-1000-8000-00805f9b34fb") is None

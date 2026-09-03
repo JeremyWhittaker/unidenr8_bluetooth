@@ -304,6 +304,30 @@ class Survey:
         return "\n".join(lines)
 
 
+def _service_name(uuid: str) -> str | None:
+    """Name a *service*, which the characteristic catalogue cannot do.
+
+    :func:`uniden_r8.gatt.describe` is keyed by characteristic and raises for
+    every service UUID, including the two vendor services this project depends
+    on. Labelling services through it therefore reported *every* service as
+    "not in this project's catalogue" -- turning the one signal this command
+    exists to produce, "here is something nobody knew about", into noise that
+    fires on everything.
+
+    Found by a test asking whether the catalogue contains any service UUID at
+    all. It does not, and never did.
+    """
+    from .discovery import KNOWN_SERVICES  # noqa: PLC0415 - avoids a cycle
+
+    known = KNOWN_SERVICES.get(uuid)
+    if known:
+        return known
+    try:
+        return describe(uuid).name
+    except Exception:  # noqa: BLE001 - an unknown service is the finding
+        return None
+
+
 def _properties_of(characteristic: Any) -> tuple[str, ...]:
     raw = getattr(characteristic, "properties", ()) or ()
     return tuple(str(item) for item in raw)
@@ -314,10 +338,7 @@ async def _enumerate(client: Any, result: Survey) -> None:
     services = getattr(client, "services", None) or []
     for service in services:
         service_uuid = normalize_uuid(str(getattr(service, "uuid", "")))
-        try:
-            service_name = describe(service_uuid).name
-        except Exception:  # noqa: BLE001 - an unknown service is the finding
-            service_name = None
+        service_name = _service_name(service_uuid)
         surveyed = SurveyedService(uuid=service_uuid, known_as=service_name)
 
         for characteristic in getattr(service, "characteristics", []) or []:
