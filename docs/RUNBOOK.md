@@ -794,10 +794,23 @@ filesystem. This project's storage is already built for that — WAL with
 an abrupt kill — so the residual risk is the operating system's filesystem,
 not the history database.
 
-Two things to check before blaming the pack: `uptime -s`, and whether
-`/etc/default/hummer-battery` sets `--on-low poweroff` rather than the default
-`stop-collector`. The default deliberately does *not* halt, for exactly this
-reason.
+**The mechanism, measured on this node rather than assumed.**
+`/etc/default/hummer-battery` sets `--on-low stop-collector`, *not* `poweroff` —
+so nothing deliberately halts the Pi. What happens instead:
+
+1. Vehicle off. The pack runs the Pi on its cell.
+2. The cell drains. At the threshold the watch stops the **collector** to save
+   power, and deliberately leaves the operating system up so the node stays
+   reachable.
+3. The operating system keeps running, and keeps draining.
+4. The cell goes flat. **Hard power cut.**
+5. Vehicle on. The pack charges and does not re-power the Pi.
+
+Which means the current arrangement gets the ungraceful cut anyway. The battery
+buys a delay, not a clean shutdown — so it pays the SD-card risk *and* the
+cannot-return cost and collects neither benefit. `uptime -s` after the fact
+confirms it: a boot timestamp long after the vehicle was switched off is step 5
+being resolved by hand.
 
 **A drive recorded rows but no heading, speed or altitude.** Those three columns
 are written only when `[history] record_detector_motion` is on, and it defaults
