@@ -1124,3 +1124,62 @@ automated add/read/delete loop.
 Three records were returned once and two another time. No rule has been
 established, and one more capture at a known distance from a known mark would
 start to.
+
+### 13.9 All three record types observed, and the layout confirmed a third time
+
+A later capture, taken from a different location, returned **73 bytes in six
+records**, and `whole-record` consumed it exactly again:
+
+```
+inspect-...T220623Z.json   73 bytes   [whole-record]
+   +  0  0x01 speed camera     13B
+   + 13  0x02 red-light camera 12B
+   + 25  0x01 speed camera     13B
+   + 38  0x02 red-light camera 12B
+   + 50  0x01 speed camera     13B
+   + 63  0x03 user mark        10B
+```
+
+13 + 12 + 13 + 12 + 13 + 10 = 73. Three captures now, at **23, 36 and 73 bytes**,
+every byte of all three accounted for by the same layout, and
+`payload-plus-header` failing on each.
+
+**Type `0x02` appears here for the first time**, at the predicted 12 bytes. All
+three record types are now observed on hardware:
+
+| Type | Meaning | Length | Grade |
+|---|---|---|---|
+| `0x01` | speed camera | 13 B | OBSERVED |
+| `0x02` | red-light camera | 12 B | OBSERVED |
+| `0x03` | user mark | 10 B | OBSERVED |
+
+Upstream published these numbers with an empty database and could not test them.
+They are correct.
+
+### 13.10 The nearby window follows the vehicle — OBSERVED
+
+§13.7 inferred that the POI characteristic returns a *nearby subset* rather than
+the database. This capture settles it, because the vehicle had moved several
+kilometres between reads:
+
+| Capture | Bytes | Records | Distance of its records from the earlier test site |
+|---|---|---|---|
+| 19:49:49Z | 23 | 2 | ~11 km |
+| 19:59:55Z | 36 | 3 | 8 m – 1.6 km |
+| 22:06:23Z | 73 | 6 | ~6.4 km |
+
+The third capture's records cluster around the vehicle's *new* position, and the
+user mark created at the earlier site — measured at 8 m from it in §13.5 — is
+simply **absent** from the returned set.
+
+So the window is anchored to where the detector currently is, and moves with it.
+Two consequences that matter operationally:
+
+1. **A stored mark can only be verified from near where it was made.** Reading
+   from elsewhere does not return it, and its absence is not evidence it was
+   deleted. This also removes the last shape of the reversibility test proposed
+   in §13.8: "the record disappeared" means nothing unless the vehicle has not
+   moved.
+2. **The set is not bounded by a fixed count.** Two, three and six records came
+   back across the three reads. Whatever selects them, it is not "the nearest
+   N". A distance bound is the obvious candidate and is not established.

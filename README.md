@@ -141,9 +141,10 @@ writing, and the result is the vehicle's actual position.
 
 It also settled the record layout by measurement rather than by argument. Two
 competing readings of upstream's numbers were on file; `whole-record` (13/12/10)
-consumed two different captures exactly — 23 of 23 bytes and then 36 of 36 —
-while `payload-plus-header` (15/14/12) desynchronised at offset 15 both times
-and is refuted.
+consumed three captures exactly — 23, 36 and 73 bytes — while
+`payload-plus-header` (15/14/12) failed on every one and is refuted. All three
+record types are now observed at their predicted lengths: speed camera 13 B,
+red-light camera 12 B, user mark 10 B.
 
 And it turned up something nobody had documented: the POI characteristic returns
 **whatever the detector currently considers nearby**, re-computed between reads,
