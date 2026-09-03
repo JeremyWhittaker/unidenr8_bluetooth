@@ -10,7 +10,7 @@ path, an absent one.
 [![CI](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-700-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-701-brightgreen.svg)](tests/)
 [![No write path](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
 
 ![The bundled dashboard: voltage, detector GPS, link status and packet counts across the top; a live

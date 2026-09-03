@@ -519,8 +519,8 @@ def _fragments(payload: bytes) -> list[str]:
     return [payload[index:index + 2].hex() for index in range(len(payload) - 1)]
 
 
-def _haystack(text: str) -> str:
-    """*text* with the catalogue's own UUIDs removed before searching it.
+def _haystack(text: str, result=None) -> str:
+    """*text* with this project's own constants removed before searching it.
 
     A UUID is a constant of this project, printed because the summary names
     the attribute it describes; it is not something the detector said.  Its
@@ -532,6 +532,27 @@ def _haystack(text: str) -> str:
     """
     for entry in gatt.CATALOGUE:
         text = text.replace(entry.uuid, "")
+    # The timestamps too, and for a sharper reason than the UUIDs.
+    #
+    # `capture_name` is "inspect-20260903T080810Z.json": a contiguous run of
+    # digits, and every digit is also a hex digit. Ten of the fragments this
+    # test searches for are pure digits -- 8081, 8182 ... 9495, out of a
+    # settings blob that is a run of consecutive byte values -- so at 08:08:10
+    # UTC the *filename* contains "8081" and this control fails, having found
+    # its own clock rather than a leak.
+    #
+    # Measured: 200 seconds a day, 0.23% of runs. A privacy control that fails
+    # a fifth of a percent of the time is worse than one that fails always,
+    # because the failure looks like flakiness and gets re-run rather than read.
+    # Neither field can carry device content -- one is a clock reading, the
+    # other is a filename built from it -- so both come out of the haystack.
+    if result is not None:
+        for generated in (result.capture_name, result.read_at):
+            if generated:
+                text = text.replace(generated, "")
+                text = text.replace(
+                    "".join(c for c in generated if c.isalnum()), ""
+                )
     return text
 
 
@@ -642,8 +663,8 @@ def test_the_summary_and_the_render_carry_no_device_bytes(tmp_path):
     store = _store(tmp_path)
     result = _inspect(store, RecordingFactory(FakeClient()), confirmed=True)
 
-    rendered = _haystack(result.render())
-    printed = _haystack(json.dumps(result.as_dict(), sort_keys=True))
+    rendered = _haystack(result.render(), result)
+    printed = _haystack(json.dumps(result.as_dict(), sort_keys=True), result)
     for blob in (POI_BYTES, SETTINGS_1_BYTES, SETTINGS_2_BYTES):
         assert blob.hex() not in rendered
         assert blob.hex() not in printed
@@ -654,6 +675,38 @@ def test_the_summary_and_the_render_carry_no_device_bytes(tmp_path):
     assert all("hex" not in entry for entry in result.as_dict()["attributes"])
     assert publish(result.render())
     assert publish(json.dumps(result.as_dict(), sort_keys=True))
+
+
+def test_the_leak_check_survives_a_timestamp_that_looks_like_the_payload(
+    tmp_path, monkeypatch
+):
+    """The clock must not be able to fail a privacy control.
+
+    At 08:08:10 UTC the capture filename is `inspect-20260908T080810Z.json`,
+    whose digits contain `8081` -- which is genuinely a two-byte fragment of the
+    settings blob, because that blob is a run of consecutive byte values. The
+    check then "found" a leak that was its own filename.
+
+    Measured at 200 seconds a day. That is the worst rate a control can have:
+    rare enough to read as flakiness and be re-run, common enough to eventually
+    train somebody to weaken the assertion. Pinned here so the fix cannot regress
+    into a mystery.
+    """
+    from uniden_r8 import inspection as inspection_module
+
+    monkeypatch.setattr(inspection_module, "utc_stamp", lambda: "20260908T080810Z")
+    store = _store(tmp_path)
+    result = _inspect(store, RecordingFactory(FakeClient()), confirmed=True)
+
+    assert "8081" in result.capture_name, "the collision is not being exercised"
+    assert "8081" in _fragments(SETTINGS_1_BYTES), "the fragment is not a real one"
+
+    rendered = _haystack(result.render(), result)
+    printed = _haystack(json.dumps(result.as_dict(), sort_keys=True), result)
+    for blob in (POI_BYTES, SETTINGS_1_BYTES, SETTINGS_2_BYTES):
+        for fragment in _fragments(blob):
+            assert fragment not in rendered, fragment
+            assert fragment not in printed, fragment
 
 
 def test_the_raw_hex_is_written_to_the_private_store_owner_only(tmp_path):

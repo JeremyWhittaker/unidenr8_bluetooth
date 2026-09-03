@@ -37,7 +37,7 @@ loop lag peaking at 2.6 ms, and every OBD invariant unchanged. `EVIDENCE.md` §1
 Untested on hardware: the `gpsd` client (no receiver attached), MQTT (no broker), the local feed, and
 the `inspect` command — which reads saved coordinates and needs its own explicit decision.
 
-700 tests pass with no radio, no broker, no `gpsd` and no network. That proves the code does what it
+701 tests pass with no radio, no broker, no `gpsd` and no network. That proves the code does what it
 was written to do. It does not prove the *protocol* is what upstream says it is.
 
 **Not proven, and the honest gap.** No real radar detection has ever been captured from this
