@@ -61,7 +61,7 @@ alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             
 | Voltage, GPS fix state | **Verified** — the status letter decoded by correlation over a full cold start: `C` is a fix, `D` is not |
 | Detector heading, speed, altitude | **Captured moving** — 2,636 packets, 0 unparsed, all 8 headings. Speed is mph (driver-corroborated); altitude is refuted as metres |
 | Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
-| Coordinates *stored* by the detector | **Yes — measured to 8 m.** One press of the detector's own MARK button stores a coordinate it derived from its own fix, and it reads back over BLE with no write path of any kind. [How that was established.](docs/EVIDENCE.md) |
+| Coordinates *stored* by the detector | **Yes — measured to 8 m and 3.8 m**, at two locations kilometres apart. One press of the detector's own MARK button stores a coordinate it derived from its own fix, and it reads back over BLE with no write path of any kind. [How that was established.](docs/EVIDENCE.md) |
 | Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
 | Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
 | SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
@@ -133,7 +133,7 @@ populated POI database was read from this detector, the first non-empty POI read
 reported on any R-series unit. One press of the physical MARK button added a
 10-byte type-03 record, and it decodes to a position **8.0 m** from a reference
 fix taken at the same spot — inside the error of the consumer GNSS the reference
-itself came from.
+itself came from. Repeated at a second location kilometres away: **3.8 m**.
 
 Nothing was written to the detector. No command, no coordinate, no write of any
 kind: the only traffic was a GATT read. A button on its own keypad did the
@@ -141,7 +141,7 @@ writing, and the result is the vehicle's actual position.
 
 It also settled the record layout by measurement rather than by argument. Two
 competing readings of upstream's numbers were on file; `whole-record` (13/12/10)
-consumed three captures exactly — 23, 36 and 73 bytes — while
+consumed four captures exactly — 23, 36, 73 and 83 bytes — while
 `payload-plus-header` (15/14/12) failed on every one and is refuted. All three
 record types are now observed at their predicted lengths: speed camera 13 B,
 red-light camera 12 B, user mark 10 B.

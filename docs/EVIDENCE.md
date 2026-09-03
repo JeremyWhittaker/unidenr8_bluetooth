@@ -1183,3 +1183,61 @@ Two consequences that matter operationally:
 2. **The set is not bounded by a fixed count.** Two, three and six records came
    back across the three reads. Whatever selects them, it is not "the nearest
    N". A distance bound is the obvious candidate and is not established.
+
+### 13.11 Confirmed a second time, at a second location — **3.8 m**
+
+A new mark was created several kilometres from the first test site and read
+immediately. The blob grew from 73 bytes to 83 — exactly one 10-byte user mark —
+and `whole-record` consumed all 83 exactly.
+
+```
+  +  0  0x01 speed camera     13B   921.7 m from the new mark
+  + 13  0x02 red-light camera 12B   921.7 m
+  + 25  0x01 speed camera     13B   921.7 m
+  + 38  0x02 red-light camera 12B   921.7 m
+  + 50  0x01 speed camera     13B     1.08 km
+  + 63  0x03 user mark        10B     3.8 m   <- created moments earlier
+  + 73  0x03 user mark        10B   555.5 m
+```
+
+**3.8 m**, against 8.0 m at the first site. Two independent measurements, two
+locations kilometres apart, both inside the error of the consumer GNSS the
+references came from. The detector's stored coordinate is the vehicle's
+position, and this is no longer a single observation.
+
+The layout has now been confirmed at **four different blob sizes** — 23, 36, 73
+and 83 bytes — with every byte of each accounted for and `payload-plus-header`
+failing on all four. 13 + 12 + 13 + 12 + 13 + 10 + 10 = 83.
+
+### 13.12 The returned set is ordered, and it is not an append
+
+The earlier blob is **not** a prefix of the later one even though the only
+change was one added mark: the new record landed at offset 63 and the
+previously-last user mark moved to 73.
+
+Reading the type bytes in order — `01 02 01 02 01 03 03` — the set comes back
+grouped by type, cameras before user marks, and the two user marks are ordered
+nearest-first (3.8 m, then 555.5 m). Whether the grouping is by type, by
+distance within type, or by something the detector computes for its own display
+is not established from one capture.
+
+What it does establish: **anything diffing these blobs must match on record
+content, not on offsets.** A record's position in the returned set is not stable
+across reads, so an offset-keyed diff will report spurious changes.
+
+Four of the records sit at an identical 921.7 m — two speed cameras and two
+red-light cameras. That is one physical intersection stored as four entries,
+almost certainly one per approach, which is the first evidence about how the
+detector's own database is organised.
+
+### 13.13 What remains open after all this
+
+**Deletion.** Still never observed. Three MARK presses, three additions.
+
+**What bounds the returned set.** Counts of 2, 3, 6 and 7 records rule out a
+fixed N. A distance bound fits every observation so far but is not established,
+and the largest observed distance in a returned set (~1.08 km) is a lower bound
+on it at best.
+
+**The `unknown` second byte** of every record type. Present in all four
+captures, never interpreted, and not worth guessing at.
