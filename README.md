@@ -169,8 +169,14 @@ The experiment is in [`docs/VALIDATION.md`](docs/VALIDATION.md) (V8) and needs n
 read the POI blob, press MARK once, read again, diff. Everything stays in the owner-only private
 store.
 
-For continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss` branch that is
-never merged with the detector's own fields, and it is off by default.
+There is also a stream this project only found by enumerating the device rather than trusting its
+own catalogue: **the POI characteristic notifies at 1 Hz**, pushing coordinate records with no
+command sent. Those are the coordinates of nearby *saved points*, not of the vehicle — but it means
+"the detector will not give you position live" was a stronger claim than the evidence supported, and
+[`docs/EVIDENCE.md`](docs/EVIDENCE.md) §16 says so.
+
+For the vehicle's own continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss`
+branch that is never merged with the detector's own fields, and it is off by default.
 
 ## How it works
 

@@ -1390,3 +1390,101 @@ by guessing. It stays untested.
 
 **Whether repeated add/delete cycles are safe.** One cycle has been run. Marks
 are flash-backed, and nothing here establishes an endurance limit.
+
+---
+
+## 16. The full attribute surface, and a coordinate stream nobody had subscribed to
+
+`uniden-r8 survey` was run for the first time. This is the first complete GATT
+enumeration of an R8 at firmware 1.43 reported anywhere: the device's own tree,
+not a catalogue inherited from an R8w.
+
+### 16.1 Fourteen characteristics, and no hidden vendor surface — OBSERVED
+
+| Service | Characteristics |
+|---|---|
+| `0000180a` device-information | 4 — model, manufacturer, firmware, software |
+| `00001800` generic access | 2 — device name, appearance |
+| `00001801` generic attribute | 1 — service changed |
+| `1842467c` uniden-command | 2 — `Command`, `Response` |
+| `18424398` uniden-data | 5 — `Data_1` … `Data_5` |
+
+Three were not in this project's catalogue, and all three are standard BLE
+housekeeping. **There is no undocumented vendor characteristic.** That is a
+negative result worth as much as a positive one: it closes off "perhaps the
+coordinates are on an attribute nobody has looked at".
+
+The detector names its own attributes through `0x2901` descriptors, and the
+names are its own numbering rather than ours:
+
+| UUID | This project calls it | The device calls it |
+|---|---|---|
+| `6c290d2e…` | Telemetry | `Data_5` |
+| `6eb675ab…` | Alerts | `Data_4` |
+| `15005991…` | POI database | `Data_3` |
+| `2d86686a…` | Settings 1 | `Data_1` |
+| `5a87b4ef…` | Settings 2 | `Data_2` |
+| `2c86686a…` | Command write | `Command` |
+| `5987b4ef…` | Command response | `Response` |
+
+**Every vendor data characteristic is `write-without-response`** — telemetry,
+alerts, POI and both settings blocks, not only the command characteristic. That
+is a larger write surface than this project had assumed existed, and none of it
+has been written to.
+
+### 16.2 The POI characteristic streams at 1 Hz — OBSERVED
+
+Subscribing to every vendor characteristic that advertises `notify`, sending
+nothing, stationary, for sixty seconds:
+
+| Characteristic | Notifications | Distinct payloads | Sizes |
+|---|---|---|---|
+| Telemetry (`Data_5`) | 60 | 15 | 26, 27, 28 B |
+| **POI (`Data_3`)** | **60** | **1** | **10 B** |
+| Alerts (`Data_4`) | 0 | — | — |
+| Settings 1 (`Data_1`) | 0 | — | — |
+| Settings 2 (`Data_2`) | 0 | — | — |
+
+**The POI characteristic pushes a record once a second, with no command sent.**
+Ten bytes: one type-`0x03` user mark, which by §13.1 is a coordinate.
+
+This project has subscribed to telemetry and alerts since it was written, and
+never to this. A coordinate-bearing stream has been available the entire time.
+
+One distinct payload only, because the vehicle was stationary and the nearest
+saved point never changed — §13.10 established that the returned set is anchored
+to where the detector is. **Whether the stream tracks the vehicle while moving is
+the obvious next measurement and has not been made.**
+
+Alerts being silent is expected: §12.5 established that characteristic notifies
+on change, and nothing was detected. Both settings blocks were silent for the
+whole window.
+
+### 16.3 The response characteristic says nothing unprompted — OBSERVED
+
+Twenty seconds subscribed, no command sent, **silence**. It speaks only when
+written to (§15.1).
+
+That is the assumption this project had encoded — the characteristic was
+excluded from every allowlist as "pointless without a command" — now measured
+rather than assumed. The assumption was right, and it was still worth the twenty
+seconds to stop it being an assumption.
+
+### 16.4 What this does to the live-coordinate question
+
+The honest position, split into the two claims it had been collapsing:
+
+**No latitude or longitude in the 1 Hz telemetry packet.** Strongly held. Two
+independent lines now support it: thousands of packets with the tripwire silent,
+and §16.1 showing there is no unexamined attribute for it to be hiding on.
+
+**No live position data from the detector at all.** *Not supported, and this
+project has been overstating it.* The POI characteristic delivers coordinate
+records at 1 Hz for free. They are the coordinates of nearby saved points rather
+than of the vehicle — a real distinction — but "the detector will not give you
+position live" is a stronger claim than the evidence carries, and §15.3's
+reversible add/delete makes a polled position query cheaper than it was assumed
+to be.
+
+The measurement that would settle it is a moving subscription to `Data_3`,
+watching whether the distinct-payload count climbs with the route.
