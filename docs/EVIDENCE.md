@@ -1042,3 +1042,85 @@ The device's own `0x2901` descriptors name the three attributes `Data_1`,
 
 **No byte of any of these blocks is recorded here or anywhere outside the
 owner-only private store.**
+
+### 13.5 The coordinate is the vehicle's, to **8 metres** — OBSERVED
+
+The operator supplied a reference fix from a phone at the same location. It was
+never written into this repository and is not recorded here; it was used once,
+to compute a distance.
+
+| Capture | Record | Distance from the reference |
+|---|---|---|
+| 19:59:55Z | type `0x03` user mark, 10 B | **8.0 m** |
+| 19:59:55Z | type `0x01` speed camera, 13 B | 1,640 m |
+| 19:59:55Z | type `0x01` speed camera, 13 B | 1,640 m |
+
+Eight metres is inside the error of the consumer GNSS the reference itself came
+from. **The record the detector wrote holds the vehicle's position.**
+
+That is the whole claim, closed:
+
+* the detector was sent nothing — no command, no coordinate, no write of any
+  kind, only a GATT read;
+* a button on its own keypad caused it to store a position;
+* the position is *correct*;
+* and it is readable over BLE by a project that has no write path at all.
+
+The float32 encoding is good to well under a metre at these latitudes, so the
+8 m is the fix's error and not the format's.
+
+### 13.6 The layout confirmed a second time, at a different size — OBSERVED
+
+The later capture is **36 bytes**, and `whole-record` consumed it exactly again:
+13 + 13 + 10. `payload-plus-header` desynchronised at offset 15 for the second
+time.
+
+Two independent captures, two different blob lengths, the same layout accounting
+for every byte of both. 13 / 12 / 10 is settled.
+
+### 13.7 The POI characteristic returns a *nearby subset*, and it changes — OBSERVED
+
+This was not expected, and it matters more than it looks.
+
+| Capture | Bytes | Records | Nearest record to the reference |
+|---|---|---|---|
+| 19:49:49Z | 23 | camera 13 B, user mark 10 B | 10,995 m |
+| 19:59:55Z | 36 | camera 13 B, camera 13 B, user mark 10 B | 8 m |
+
+Ten minutes apart, from a stationary vehicle, the contents changed completely.
+The earlier blob is **not** a prefix of the later one, and the user mark in the
+first capture is nearly twelve kilometres from where the vehicle was parked --
+so it is a different, older mark, not the one just created.
+
+The characteristic therefore does not expose a stable database that grows by
+append. It exposes **whatever the detector currently considers nearby**, and
+that set is re-computed between reads.
+
+Three consequences:
+
+1. **A before/after diff cannot assume append semantics.** `poi_diff` already
+   reports `appended_only` and warns when a change is not a clean append, which
+   is exactly the case here -- but the warning is now the *normal* result rather
+   than the exception, and anything built on top must treat it that way.
+2. **"The blob returned to baseline" is not available as a reversibility test.**
+   The baseline itself moves. Reversibility has to be judged on the specific
+   record, by its decoded position, not on the bytes as a whole.
+3. **A read is a sample of a moving window, not an export.** Backing up the full
+   POI database is not something this characteristic can do; the official USB
+   tool's `UMR` command remains the only candidate for that, and is untested.
+
+The two type-`0x01` records at an identical 1,640 m are most likely one physical
+camera stored twice -- both directions of the same road, or a duplicate entry.
+Not established.
+
+### 13.8 What is still not established
+
+**Reversibility.** Neither press deleted anything; the second added a record
+rather than removing one. A deletion has not been observed, and §13.7 means the
+obvious test for it does not work. Nothing here should be built into an
+automated add/read/delete loop.
+
+**Whether the subset is distance-bounded, count-bounded, or something else.**
+Three records were returned once and two another time. No rule has been
+established, and one more capture at a known distance from a known mark would
+start to.

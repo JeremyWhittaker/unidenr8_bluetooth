@@ -61,7 +61,7 @@ alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             
 | Voltage, GPS fix state | **Verified** — the status letter decoded by correlation over a full cold start: `C` is a fix, `D` is not |
 | Detector heading, speed, altitude | **Captured moving** — 2,636 packets, 0 unparsed, all 8 headings. Speed is mph (driver-corroborated); altitude is refuted as metres |
 | Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
-| Coordinates *stored* by the detector | **Yes, and confirmed on hardware.** One press of the detector's own MARK button writes a coordinate it derived from its own fix; the record reads back over BLE with no write path. [How that was established.](docs/EVIDENCE.md) |
+| Coordinates *stored* by the detector | **Yes — measured to 8 m.** One press of the detector's own MARK button stores a coordinate it derived from its own fix, and it reads back over BLE with no write path of any kind. [How that was established.](docs/EVIDENCE.md) |
 | Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
 | Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
 | SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
@@ -128,17 +128,29 @@ current location — the command carries no coordinates, so the detector must be
 its own fix — and that record is then readable from the POI characteristic. If that works on this
 model, one button press yields one detector-derived coordinate.
 
-**That has now been checked, and it works.** On 2026-09-03 a populated POI
-database was read from this detector — 23 bytes, the first non-empty POI read
-reported on any R-series unit. One press of the physical MARK button had added a
-10-byte type-03 record, and it decodes to a legal coordinate the detector
-derived from its own fix. Nothing was written to the detector; the only traffic
-was a GATT read.
+**That has now been checked, and it works — to eight metres.** On 2026-09-03 a
+populated POI database was read from this detector, the first non-empty POI read
+reported on any R-series unit. One press of the physical MARK button added a
+10-byte type-03 record, and it decodes to a position **8.0 m** from a reference
+fix taken at the same spot — inside the error of the consumer GNSS the reference
+itself came from.
+
+Nothing was written to the detector. No command, no coordinate, no write of any
+kind: the only traffic was a GATT read. A button on its own keypad did the
+writing, and the result is the vehicle's actual position.
 
 It also settled the record layout by measurement rather than by argument. Two
 competing readings of upstream's numbers were on file; `whole-record` (13/12/10)
-consumed the blob exactly, 23 of 23 bytes, and `payload-plus-header` (15/14/12)
-desynchronised at offset 15 and is refuted.
+consumed two different captures exactly — 23 of 23 bytes and then 36 of 36 —
+while `payload-plus-header` (15/14/12) desynchronised at offset 15 both times
+and is refuted.
+
+And it turned up something nobody had documented: the POI characteristic returns
+**whatever the detector currently considers nearby**, re-computed between reads,
+not a stable database that grows by append. Two captures ten minutes apart from a
+stationary vehicle shared no bytes. That means a read is a sample of a moving
+window rather than an export — see [`docs/EVIDENCE.md`](docs/EVIDENCE.md) §13.7,
+because it constrains what any tool built on this can claim.
 
 The design that made that possible is worth stating, because it is the whole
 approach:
