@@ -667,10 +667,25 @@ park, not on the driveway, because its bytes are about to be examined.
 8. Restart the collector.
 
 ```bash
-sudo systemctl stop unidenr8-collector
-.venv/bin/uniden-r8 inspect --confirm          # snapshot A
+sudo ./scripts/poi-capture.sh                  # snapshot A
 # ... short-press MARK once on the detector; do not hold it ...
-.venv/bin/uniden-r8 inspect --confirm          # snapshot B
+sudo ./scripts/poi-capture.sh                  # snapshot B
+```
+
+`scripts/poi-capture.sh` does the whole cycle: stops the collector, waits for
+BlueZ to release the detector to a new central, reads once, retries if the first
+attempt cannot reach it, and **always restarts the collector** — including when
+the read fails. A collector left stopped is a drive not captured, and doing this
+by hand leaves one stopped in the middle. It reads as the invoking user rather
+than as root, because the private store is `0700` and a root-written capture in
+it would be unreadable to every other command here.
+
+Doing it by hand still works, and is what the script runs:
+
+```bash
+sudo systemctl stop unidenr8-collector
+sleep 12                                       # BlueZ needs a moment
+.venv/bin/uniden-r8 inspect --confirm
 sudo systemctl start unidenr8-collector
 ```
 
