@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from uniden_r8.privacy import looks_like_identifier
+from uniden_r8.privacy import looks_like_identifier, looks_like_position
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -179,3 +179,41 @@ def test_the_readme_carries_no_identifiers():
     readme = REPO_ROOT / "README.md"
     if readme.exists():
         assert not looks_like_identifier(readme.read_text(encoding="utf-8"))
+
+
+def test_docs_carry_no_coordinates():
+    """The other half of the privacy invariant, and it had no control.
+
+    `evidence.publish()` refuses a document containing a position, and
+    `looks_like_identifier` keeps addresses out of every committable file -- but
+    nothing checked the documentation for a coordinate, even though the docs are
+    where a real one would most plausibly be pasted while writing up a POI or
+    GNSS result. This project's own handoff lists "no coordinate in published
+    output" as an invariant; a stated invariant with no test is a convention.
+
+    Scoped to prose rather than to every file because a coordinate has no
+    unambiguous shape: a decimal pair is also a version range, a byte histogram,
+    or a pair of measurements. Prose is where the risk actually is.
+    """
+    offenders = []
+    for path in [*sorted(REPO_ROOT.glob("docs/*.md")), REPO_ROOT / "README.md"]:
+        if not path.exists():
+            continue
+        if looks_like_position(path.read_text(encoding="utf-8")):
+            offenders.append(str(path.relative_to(REPO_ROOT)))
+    assert not offenders, f"coordinate-shaped text in documentation: {offenders}"
+
+
+def test_the_coordinate_scan_actually_catches_one():
+    """A control that cannot fail proves nothing.
+
+    Demonstrates that the check above would catch a real paste rather than
+    passing because `looks_like_position` never returns true for prose.
+    """
+    # Assembled rather than written out, for the same reason `fixtures.py`
+    # builds addresses from octets: the file that proves the control works
+    # must not itself be the thing the control is looking for.
+    latitude = f"{33.0 + 0.4484:.4f}"
+    longitude = f"{-(112.0 + 0.0740):.4f}"
+    assert looks_like_position(f"the fix came back {latitude}, {longitude} at 04:12Z")
+    assert not looks_like_position("324 of 324 packets, 0 unparsed, 2.6 ms")

@@ -68,7 +68,7 @@ reason.
 | `state.json` | `<state_dir>/state.json` | `0600` in a `0700` directory | no — `.state/` is git-ignored | 1 | always, by the collector |
 | `state-v2.json` | `<state_dir>/state-v2.json` | `0600` in a `0700` directory | no | 2 | only when `collector.detail = true` (the default) |
 | `collector.lock` | `<state_dir>/collector.lock` | `0600` | no | n/a | held for the life of one collector |
-| History database | `history.path`, relative paths resolving against `<state_dir>`; default `history.db` | `0600` | no | 2 (`storage.SCHEMA_VERSION`) | only when `history.enabled = true` |
+| History database | `history.path`, relative paths resolving against `<state_dir>`; default `history.db` | `0600` | no | 3 (`storage.SCHEMA_VERSION`) | only when `history.enabled = true` |
 | Raw packet captures | `.private/live-raw-<stamp>.json` | `0600` in a `0700` directory | no | n/a | only by the one-shot `live` command |
 
 `<state_dir>` is `collector.state_dir`, default `.state`, overridable per run
@@ -457,7 +457,8 @@ failure masquerade as a measurement.
 | Key | Type | Meaning |
 |---|---|---|
 | `active` | bool | Something is being warned about. |
-| `raw` | string or null | The field verbatim, if short and alphanumeric. |
+| `raw` | string or null | The group, sanitised per comma-separated sub-field and rejoined. Null when a sub-field fails sanitising, or when `suspect_pair` is true. |
+| `suspect_pair` | bool | The coordinate tripwire fired: two adjacent sub-fields both parsed as decimal degrees, so `raw` was withheld. |
 | `decoded` | null | Always null. There is no parser. |
 
 `decoded` is permanently `null` and that is the honest answer. The only POI
@@ -531,15 +532,17 @@ to `band` and `direction`.
 | Key | Type | Meaning | Grade |
 |---|---|---|---|
 | `slot` | int | Position in the snapshot. **Not an identity** — the detector re-orders slots as signals rise and fall. | UPSTREAM |
-| `band` | string | Allowlisted band, or `"unknown"`. | UPSTREAM |
-| `strength_1_to_8` | int | Bars, 1 to 8. | UPSTREAM |
-| `raw_signal` | int | The finer-grained signal number behind the bars. | UPSTREAM |
+| `band` | string | The band as sent, upper-cased. Usually an allowlisted name; see `band_recognised`. | UPSTREAM |
+| `band_recognised` | bool | False when the band is not one upstream documented. The alert is still published — but `frequency_ghz` and `laser_gun_id` are left null, because that split is keyed on the band and an unknown band selects neither. | OBSERVED (mechanism) |
+| `strength_1_to_8` | int | Bars, 1 to 8. The one numeric field with an established range, and the only value besides the active marker that the slot gate still requires. | UPSTREAM |
+| `raw_signal` | int or null | The finer-grained signal number behind the bars. Null when it did not parse; its scale is unknown, so it no longer gates the slot. | UPSTREAM |
 | `frequency_ghz` | float or null | Radar frequency, for the radar bands only. | UPSTREAM |
 | `laser_gun_id` | int or null | Field 5 when the band is laser. | UPSTREAM-UNVERIFIED |
 | `laser_gun` | string or null | The gun type name, looked up by bounds check. | UPSTREAM-UNVERIFIED |
 | `field_5_raw` | string or null | Field 5 exactly as sent, whatever it turned out to mean. | OBSERVED (as bytes) |
 | `direction` | string | `"front"`, `"side"`, `"rear"`, or `"unknown"`. | UPSTREAM |
-| `direction_code` | string or null | The raw `F`/`S`/`R`. | UPSTREAM |
+| `direction_code` | string or null | The raw `F`/`S`/`R`, null when the code was not one of those. | UPSTREAM |
+| `direction_raw` | string or null | Field 6 exactly as sent, upper-cased, kept whether or not it matched. The direction vocabulary comes from an R8w; if this detector uses a different one, this is the field that shows it. | OBSERVED (as bytes) |
 | `mute_code` | string or null | Field 7 verbatim. | UPSTREAM |
 | `mute_state` | string | Decoded name, or `"unknown"`. | mixed |
 | `muted` | bool or null | **Tri-state here**, unlike schema 1. | UPSTREAM |
@@ -1321,10 +1324,21 @@ transactions but cannot corrupt the file. Losing the last second of telemetry on
 a hard power cut is acceptable; a corrupt file that takes the whole history with
 it is not.
 
-There is **no migration path**, on purpose. `storage.SCHEMA_VERSION` is `2`, and
-opening a database written under a different version raises `HistoryError`
-telling the operator to move the old file aside rather than mixing rows written
-under different meanings.
+`storage.SCHEMA_VERSION` is `3`. Migration is **additive only**, and deliberately
+narrow: `History._migrate` holds an explicit list of steps that add columns, and
+nothing else. Old rows are never rewritten, so a row keeps exactly the meaning it
+had and the new columns read NULL — which is the truth, that the reading did not
+record them. A version not in that list still raises `HistoryError` telling the
+operator to move the old file aside rather than mix rows written under different
+meanings.
+
+The reason a bare refusal was not good enough: it is raised inside the writer
+thread, which records the error and returns, so the collector goes on running,
+goes on publishing a healthy state document, and silently writes nothing. In a
+vehicle that means the first upgrade after an install quietly stops capturing
+drives, and nobody notices until they look for a detection that should be there.
+A refusal is the right answer to a change of meaning and the wrong answer to an
+added column.
 
 Read it with `uniden-r8 history [stats|events|encounters|telemetry]`, which
 touches no radio, or with any SQLite client.
@@ -1457,6 +1471,8 @@ near-identical voltage readings on an SD card, so at most one row every
 | `voltage` | REAL | May be NULL for an unparsed packet. |
 | `gps_locked` | INTEGER | 0, 1, or NULL — the same tri-state as the JSON. |
 | `poi_active` | INTEGER | 0 or 1. |
+| `poi_raw` | TEXT | The POI group, sanitised. **NULL unless `history.record_detector_motion` is on** — a warning naming a specific camera is a position by another route. Added in schema 3. |
+| `poi_suspect` | INTEGER | 0 or 1: the POI coordinate tripwire fired and the text was withheld. Not gated — it carries no content, and a withheld reading must not look like an empty one. Added in schema 3. |
 | `direction_8` | TEXT | **NULL unless `history.record_detector_motion` is on.** |
 | `speed_mph` | INTEGER | **NULL unless `history.record_detector_motion` is on.** |
 | `altitude_ft` | INTEGER | **NULL unless `history.record_detector_motion` is on.** |
@@ -1465,6 +1481,15 @@ near-identical voltage readings on an SD card, so at most one row every
 | `scan_raw` | TEXT | Field 4, verbatim. |
 
 Index: `telemetry_at` on `(at)`.
+
+A schema-2 database is migrated in place: `History._migrate` adds the two POI
+columns and moves the marker to 3. Old rows read NULL for them, which is the
+truth — those readings did not record them. A bare refusal was the wrong failure
+here, because it is raised inside the writer thread, which reports the error and
+returns; the collector then keeps running, keeps publishing a healthy state
+document, and silently records nothing. On a vehicle that means the first
+upgrade after an install quietly loses every subsequent drive. A refusal is still
+correct for a change of *meaning*, and an unknown schema is still refused.
 
 The three motion columns are the opt-in, and it defaults to off, because a
 history of where a vehicle has been is a different kind of file from a history

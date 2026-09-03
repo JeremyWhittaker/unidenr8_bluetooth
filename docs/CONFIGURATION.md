@@ -230,9 +230,15 @@ detector sends about one telemetry packet a second (OBSERVED: ~0.98/s over a
 rows a day of mostly identical voltage readings, on an SD card with finite write
 endurance.
 
-**`retain_days` is applied once, at writer start** (`storage.HistoryWriter._run`
-calls `History.prune`). A collector that runs for a month without restarting
-does not sweep again in the meantime.
+**`retain_days` is applied at writer start, and then every six hours.**
+`storage.HistoryWriter._run` calls `History.prune` once when the writer opens,
+then again every `storage.PRUNE_INTERVAL_SECONDS` for as long as the writer
+thread lives. It used to be once only, which was exactly backwards: a collector
+started by hand for an hour was swept every time, and a collector installed as a
+service and left alone for a month was swept once -- and only the second one
+accumulates. At one telemetry row a second, a day is around 86,000 rows, so a
+service surviving a fortnight of driving would have carried the whole fortnight
+regardless of `retain_days`, on an SD card.
 
 **The sweep does not trust the clock.** `History.prune` measures back from
 `min(now, newest row held)` rather than from `now`. This board has no
@@ -533,7 +539,7 @@ git-ignored, which makes it the natural home.
 
 ---
 
-## 6. Three worked configurations
+## 6. Four worked configurations
 
 Each of these has been loaded through `load_config()` and its warnings checked
 against what is claimed.
@@ -728,6 +734,62 @@ latitude or longitude (OBSERVED) — so it is where the *receiver* said the
 vehicle was, subject to `gnss.stale_after_seconds`.
 
 ---
+
+### 6.4 A validation drive
+
+**Who this is for:** the Hummer node, temporarily, for the one drive whose
+purpose is to validate the detector's own heading, speed and altitude against
+something external -- V1 in `docs/VALIDATION.md`. This is 6.1 with two keys
+changed. Revert to 6.1 afterwards unless the data is wanted kept.
+
+```toml
+[collector]
+state_dir = "/home/jeremy/unidenr8/.state"
+detail = true
+heartbeat_seconds = 5.0
+
+[obd]
+guard = true
+unit = "hummer-rfcomm"
+device = "/dev/rfcomm0"
+
+[history]
+enabled = true
+path = "history.db"
+retain_days = 30
+telemetry_every_seconds = 1.0        # 6.1 uses 10.0
+record_detector_motion = true        # 6.1 uses false
+
+[gnss]
+enabled = false
+```
+
+Warnings at start-up: **none**. Neither key has one -- `Config.warnings()` does
+not check either -- and that is precisely why this profile is written down.
+Turning these on costs nothing you will be told about, and leaving them off
+costs a drive you cannot repeat.
+
+**`telemetry_every_seconds = 1.0`.** 6.1's `10.0` stores roughly one row every
+ten seconds. Against a detector sending at about 1 Hz, that is fine for "is it
+alive" and useless for lining one heading reading up against one GPS second.
+
+**`record_detector_motion = true`.** The default is `false`, and with it off the
+collector runs perfectly, publishes a healthy state document, and writes the
+`telemetry` table's `direction_8`, `speed_mph` and `altitude_ft` columns as
+`NULL` on every row. That is what was actually happening on this node before it
+was noticed (`docs/EVIDENCE.md` §11.4). **A drive undertaken specifically to
+validate those three fields, run under the default, produces a database that
+cannot answer the question it was driven to answer.** The same flag also gates
+the POI warning's text, which is what V7 needs.
+
+**The trade, plainly.** These are the detector's own heading, speed and
+altitude, not a GPS fix -- but they are position-adjacent: reported
+continuously, timestamped, and over a drive capable of sketching a route. They
+land in `history.db`, `0600` inside a `0700` git-ignored `.state/`, like
+everything else this project treats as sensitive. The default is off for that
+reason. Turning it on for one drive is a decision, not an oversight: write down
+that it was made and for how long, and turn it back off if the data is not
+wanted long-term.
 
 ## 7. Sharp edges, checked against the code
 

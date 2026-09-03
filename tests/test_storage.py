@@ -965,3 +965,80 @@ def test_the_writer_publishes_what_its_startup_sweep_did(tmp_path):
         assert status["prune_refused"] == []
     finally:
         writer.stop()
+
+
+def test_a_schema_two_database_is_migrated_rather_than_refused(tmp_path):
+    """An additive upgrade must not orphan a database full of real drives.
+
+    A bare refusal is raised inside the writer thread, which records the error
+    and returns -- so the collector keeps running, keeps publishing a healthy
+    state document, and silently stops recording.  On a vehicle that means the
+    first upgrade after an install quietly loses every subsequent drive, and
+    nobody finds out until they look for a detection that should be there.
+    """
+    path = tmp_path / "history.db"
+
+    # Build a schema-2 database the way the previous build would have.
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema', '2');
+            CREATE TABLE telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER, at TEXT, wall_ns INTEGER,
+                monotonic_ns INTEGER, voltage REAL, gps_locked INTEGER,
+                poi_active INTEGER, direction_8 TEXT, speed_mph INTEGER,
+                altitude_ft INTEGER, status_raw TEXT, warning_raw TEXT,
+                scan_raw TEXT
+            );
+            INSERT INTO telemetry (voltage, poi_active) VALUES (13.6, 0);
+            """
+        )
+
+    history = storage.History(path)
+    history.open()
+    try:
+        columns = {
+            row[1] for row in history.connection.execute(
+                "PRAGMA table_info(telemetry)"
+            )
+        }
+        assert "poi_raw" in columns
+        assert "poi_suspect" in columns
+
+        # The pre-existing row survives, and reads NULL for what it never
+        # recorded -- which is the truth, not a default.
+        row = history.connection.execute(
+            "SELECT voltage, poi_raw, poi_suspect FROM telemetry"
+        ).fetchone()
+        assert row[0] == pytest.approx(13.6)
+        assert row[1] is None
+        assert row[2] is None
+
+        marker = history.connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema'"
+        ).fetchone()
+        assert marker[0] == str(storage.SCHEMA_VERSION)
+    finally:
+        history.close()
+
+
+def test_a_database_from_an_unknown_schema_is_still_refused(tmp_path):
+    """Migration is for additions only; a change of meaning must still stop.
+
+    The companion to the test above: without this one, "we added a migration"
+    would quietly become "we open anything", and rows written under different
+    meanings would be mixed silently.
+    """
+    path = tmp_path / "history.db"
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+            "INSERT INTO meta (key, value) VALUES ('schema', '99');"
+        )
+
+    history = storage.History(path)
+    with pytest.raises(storage.HistoryError, match="schema 99"):
+        history.open()
+    history.close()

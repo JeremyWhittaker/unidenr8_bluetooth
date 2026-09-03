@@ -13,15 +13,24 @@ private store, and prints a summary that contains no device bytes at all.
 
 What it refuses to do
 ---------------------
-**It does not decode POI records.**  Upstream published a candidate layout --
-payloads of 13, 12 and 10 bytes after a type byte and one unknown byte, giving
-whole records of 15, 14 and 12, with big-endian floats at offsets 2 and 6 --
-and also recorded that the only POI database it ever read was empty.  A parser built on
-that would be a parser that can appear to succeed on bytes nobody has ever
-seen, and its output would be coordinates: home, work, the roads Jeremy drives.
-A wrong address printed confidently is worse than no address.  So this reports
-lengths, byte histograms and record-boundary *candidates*, and leaves the
-decoding to a person looking at the hex with the detector in front of them.
+**It does not decode POI records.**  Upstream published the numbers 13, 12 and
+10 for the three record types, and recorded that the only POI database it ever
+read was empty.  Those numbers have two readings, and this project has held
+both: that they are *payload* sizes following a type byte and one unknown byte,
+making whole records of 15, 14 and 12; or that they are the *whole* record
+lengths already, counting the type byte and the unknown byte, with big-endian
+floats at offsets 2 and 6.  The second reading is what a field-by-field count
+of Uniden's own app produces, and it is self-consistent: 1 + 1 + 4 + 4 + 2 + 1
+= 13 for a speed camera, 12 without the speed byte, 10 for a bare user mark.
+
+Neither reading has been checked against a populated database on any detector,
+so this module does not pick one.  It evaluates every candidate layout against
+the bytes and reports which of them -- if any -- consumes the blob exactly.
+That is a measurement; picking one and writing a parser would be a guess whose
+output is coordinates: home, work, the roads Jeremy drives.  A wrong address
+printed confidently is worse than no address.  So this reports lengths, byte
+histograms and per-layout record-boundary *verdicts*, and leaves the decoding to
+a person looking at the hex with the detector in front of them.
 
 **It does not decode settings.**  Same reason, weaker consequences.  A
 community byte map exists, it is incomplete, and it is keyed to firmware nobody
@@ -72,6 +81,8 @@ __all__ = [
     "inspect",
     "summarise_bytes",
     "record_boundaries",
+    "evaluate_layouts",
+    "CANDIDATE_LAYOUTS",
 ]
 
 #: Ceiling on the whole connect-read-disconnect cycle.  The radio is shared
@@ -80,13 +91,39 @@ __all__ = [
 CONNECT_TIMEOUT_SECONDS: Final[float] = 25.0
 SESSION_CEILING_SECONDS: Final[float] = 90.0
 
-#: Record lengths upstream proposed for the three POI types, used only to
-#: *suggest* where records might begin.  Candidates, printed as candidates.
-CANDIDATE_RECORD_LENGTHS: Final[dict[int, tuple[str, int]]] = {
-    1: ("speed camera", 15),
-    2: ("red-light camera", 14),
-    3: ("user mark", 12),
+#: The competing readings of upstream's POI record lengths, kept side by side
+#: because nobody has read a populated POI database on any detector and a swap
+#: would destroy the record of the disagreement rather than settle it.
+#:
+#: ``whole-record`` reads upstream's 13/12/10 as the total record length,
+#: which is what a field-by-field count of Uniden's own app produces:
+#: type(1) + unknown(1) + lat f32(4) + lon f32(4) + angle u16(2) + speed(1).
+#: Graded UPSTREAM-UNVERIFIED -- upstream's published numbers, never tested.
+#:
+#: ``payload-plus-header`` reads the same numbers as the payload *after* a type
+#: byte and an unknown byte, giving 15/14/12.  Graded INFERENCE: it is this
+#: project's own reading, and it is the one a single capture can refute.
+#:
+#: ``docs/EVIDENCE.md`` §11 carries both grades.  One populated capture decides
+#: it: see :func:`evaluate_layouts`.
+CANDIDATE_LAYOUTS: Final[dict[str, dict[int, tuple[str, int]]]] = {
+    "whole-record": {
+        1: ("speed camera", 13),
+        2: ("red-light camera", 12),
+        3: ("user mark", 10),
+    },
+    "payload-plus-header": {
+        1: ("speed camera", 15),
+        2: ("red-light camera", 14),
+        3: ("user mark", 12),
+    },
 }
+
+#: Retained under its original name so an existing caller keeps working.  It is
+#: one of two hypotheses, not the blessed one.
+CANDIDATE_RECORD_LENGTHS: Final[dict[int, tuple[str, int]]] = CANDIDATE_LAYOUTS[
+    "payload-plus-header"
+]
 
 
 class InspectionRefused(RuntimeError):
@@ -219,20 +256,31 @@ def summarise_bytes(payload: bytes) -> dict[str, Any]:
     }
 
 
-def record_boundaries(payload: bytes) -> list[dict[str, Any]]:
+def record_boundaries(
+    payload: bytes,
+    lengths: dict[int, tuple[str, int]] | None = None,
+) -> list[dict[str, Any]]:
     """Suggest where POI records might begin.  Suggestions, not a parse.
 
-    Walks the blob treating byte 0 of each record as a type marker and using
-    upstream's candidate lengths, and stops the moment it meets a byte that is
-    not a known type.  If the walk consumes the whole blob exactly, that is
-    weak evidence the layout is right; if it does not, that is evidence it is
-    wrong.  Either answer is worth having and neither is a coordinate.
+    Walks the blob treating byte 0 of each record as a type marker and using one
+    candidate length table, and stops the moment it meets a byte that is not a
+    known type, or a record that would run off the end.  If the walk consumes
+    the whole blob exactly, that is weak evidence the layout is right; if it
+    does not, that is evidence it is wrong.  Either answer is worth having and
+    neither is a coordinate.
+
+    *lengths* defaults to the ``payload-plus-header`` reading only so that an
+    existing caller behaves as it did.  Prefer :func:`evaluate_layouts`, which
+    runs every candidate and reports which one fits: with a single table this
+    can only ever say "the one layout I was given did not work", which is a
+    false negative dressed as a result.
     """
+    table = CANDIDATE_RECORD_LENGTHS if lengths is None else lengths
     suggestions: list[dict[str, Any]] = []
     offset = 0
     while offset < len(payload):
         marker = payload[offset]
-        candidate = CANDIDATE_RECORD_LENGTHS.get(marker)
+        candidate = table.get(marker)
         if candidate is None:
             suggestions.append({
                 "offset": offset,
@@ -242,15 +290,74 @@ def record_boundaries(payload: bytes) -> list[dict[str, Any]]:
             })
             break
         kind, length = candidate
+        fits = offset + length <= len(payload)
         suggestions.append({
             "offset": offset,
             "type_byte": f"0x{marker:02x}",
             "kind": kind,
             "candidate_length": length,
-            "fits": offset + length <= len(payload),
+            "fits": fits,
         })
+        if not fits:
+            # Stop rather than stepping past the end.  Continuing would advance
+            # `offset` beyond `len(payload)`, ending the loop silently and
+            # rendering an overshoot as a completed walk -- which is the one
+            # answer this function must never give.
+            break
         offset += length
     return suggestions
+
+
+def evaluate_layouts(payload: bytes) -> list[dict[str, Any]]:
+    """Run every candidate POI layout against *payload* and report the verdicts.
+
+    This is the instrument the layout question is actually decided with.  Each
+    layout gets: how many records it walked, whether every one of them fit, how
+    many bytes it consumed, and -- the discriminator -- whether it consumed the
+    blob **exactly**.  A blob written in one layout desynchronises almost
+    immediately under the other, so on a populated database at most one entry
+    should come back ``exact``.
+
+    Returns a list ordered so that layouts which consumed the blob exactly come
+    first, then by how far each got.  Nothing here decodes a coordinate: the
+    result carries counts, offsets and layout names, and no value read out of
+    the payload except type bytes.
+    """
+    verdicts: list[dict[str, Any]] = []
+    for name, table in CANDIDATE_LAYOUTS.items():
+        walk = record_boundaries(payload, table)
+        recognised = [entry for entry in walk if entry.get("kind") != "unrecognised"]
+        consumed = sum(
+            int(entry["candidate_length"]) for entry in recognised if entry.get("fits")
+        )
+        # "Complete" must mean the walk consumed the blob, which needs BOTH
+        # that it never met an unknown type byte AND that every record fitted.
+        # An overshooting record still has a recognised `kind`, so counting
+        # entries alone reported a truncated walk as a clean pass -- and the one
+        # capture this is meant to adjudicate, a single 10-byte user mark read
+        # under a 12-byte layout, is exactly that shape.
+        complete = (
+            bool(recognised)
+            and len(recognised) == len(walk)
+            and all(entry.get("fits") for entry in recognised)
+        )
+        verdicts.append({
+            "layout": name,
+            "record_lengths": "/".join(
+                str(length) for _, length in sorted(table.values(), key=lambda v: -v[1])
+            ),
+            "records": len(recognised),
+            "all_fit": all(entry.get("fits") for entry in recognised),
+            "bytes_consumed": consumed,
+            "bytes_total": len(payload),
+            "complete": complete,
+            "exact": complete and consumed == len(payload),
+            "stopped_at": None if complete else (
+                walk[-1]["offset"] if walk else 0
+            ),
+        })
+    verdicts.sort(key=lambda v: (not v["exact"], -v["bytes_consumed"]))
+    return verdicts
 
 
 def _describe_bytes(dump: AttributeDump) -> list[str]:
@@ -267,13 +374,18 @@ def _describe_bytes(dump: AttributeDump) -> list[str]:
         + (", all identical" if stats["all_same"] else "")
     ]
     if dump.sensitive and not stats["all_same"]:
-        walk = record_boundaries(payload)
-        recognised = [entry for entry in walk if entry.get("kind") != "unrecognised"]
-        lines.append(
-            f"{len(recognised)} candidate record boundar"
-            f"{'y' if len(recognised) == 1 else 'ies'} on upstream's layout"
-            + ("" if len(recognised) == len(walk) else ", walk did not complete")
-        )
+        for verdict in evaluate_layouts(payload):
+            summary = (
+                "consumes the blob exactly" if verdict["exact"]
+                else f"{verdict['bytes_consumed']}/{verdict['bytes_total']} bytes, "
+                     + ("all records fit" if verdict["complete"]
+                        else f"walk stopped at offset {verdict['stopped_at']}")
+            )
+            lines.append(
+                f"{verdict['layout']} ({verdict['record_lengths']}): "
+                f"{verdict['records']} record"
+                f"{'' if verdict['records'] == 1 else 's'}, {summary}"
+            )
         lines.append("contents NOT decoded: they would be saved coordinates")
     return lines
 

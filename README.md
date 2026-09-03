@@ -10,7 +10,7 @@ path, an absent one.
 [![CI](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests](https://img.shields.io/badge/tests-640-brightgreen.svg)](tests/)
+[![Tests](https://img.shields.io/badge/tests-691-brightgreen.svg)](tests/)
 [![No write path](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
 
 ![The bundled dashboard: voltage, detector GPS, link status and packet counts across the top; a live
@@ -60,7 +60,8 @@ alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             
 | Discovery, pairing, identity, live telemetry | **Verified on hardware** — 508/508 packets parsed across four runs |
 | Voltage, GPS fix state | **Verified** |
 | Detector heading, speed, altitude | **Decoded**; units still need a moving capture |
-| Latitude/longitude from the detector | **Not available** — it does not send any. [Measured, not assumed.](docs/EVIDENCE.md) Use `gpsd`. |
+| Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
+| Coordinates *stored* by the detector | **Open question.** It can save a user mark from its own fix, and that record is readable. Untested here — see [below](#the-coordinate-question). |
 | Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
 | Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
 | SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
@@ -88,10 +89,21 @@ to it, then:
 .venv/bin/uniden-r8 live --seconds 30            # look at it
 ```
 
-For the long-running collector, the history and the dashboard, see
-[`docs/RUNBOOK.md`](docs/RUNBOOK.md). If your host has no OBD-II adapter — most don't — set
-`guard = false` under `[obd]` in the config first, or the collector will refuse to run and be right
-to.
+Then install it as a service, so it is running the next time you drive:
+
+```bash
+.venv/bin/uniden-r8 config --example > unidenr8.toml   # then edit it
+./scripts/install-service.sh                           # one sudo prompt
+```
+
+The installer derives every path from the tree it runs out of, refuses to install if the read-only
+audit does not pass, warns you if history is switched off or the OBD guard names a unit this host
+does not have — and then verifies the result by watching the packet counter move, because
+`active (running)` only means the process has not exited yet.
+
+If your host has no OBD-II adapter — most don't — set `guard = false` under `[obd]` first, or the
+collector will refuse to run and be right to. Full operating procedure is in
+[`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 > [!IMPORTANT]
 > **Live telemetry is verified on real hardware. Active radar alerts are not.**
@@ -99,6 +111,39 @@ to.
 > product. The only alert packet this project has ever seen from a real non-W R8 is all-clear
 > (`0&0&0&0`). Treat any alert it reports as unvalidated. This is the single biggest gap, and
 > [it is the easiest one to help with](#contributing).
+
+## The coordinate question
+
+Worth being precise about, because it is the thing people most often get wrong in both directions.
+
+**The live telemetry packet carries no latitude or longitude.** That is measured on this detector,
+not inferred from upstream: the four-field GPS sub-group is exactly the width a coordinate pair
+would need, so the fields were read, and the first one is a compass point. There is a tripwire in
+the parser that fires if two adjacent sub-fields ever both look like decimal degrees — if it fires,
+the documentation is what needs correcting, not the tripwire.
+
+**That is not the same as "the detector will not give you a position."** It plainly knows where it
+is; it draws on saved camera locations. Uniden's own app can ask it to save a *user mark* at the
+current location — the command carries no coordinates, so the detector must be filling them in from
+its own fix — and that record is then readable from the POI characteristic. If that works on this
+model, one button press yields one detector-derived coordinate.
+
+Nobody has checked. This project has never read a populated POI database, on any detector, so:
+
+- there is **no POI parser here**, deliberately. A parser that can appear to succeed on a structure
+  nobody has seen populated would manufacture coordinates that somebody would believe, and its
+  output is where people live.
+- what there *is* is `inspection.evaluate_layouts()`, which runs **every** candidate record layout
+  against the bytes and reports which one consumes the blob exactly. Two layouts are on file, one
+  from upstream's numbers read as whole records and one read as payloads, and they are separately
+  graded. One capture settles it, in either direction, and the tool says which.
+
+The experiment is written up in [`docs/VALIDATION.md`](docs/VALIDATION.md) (V8). It needs no write
+path: park, read the POI blob, press the physical MARK button once, read again, diff. Everything
+stays in the owner-only private store.
+
+For continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss` branch that is
+never merged with the detector's own fields, and it is off by default.
 
 ## How it works
 

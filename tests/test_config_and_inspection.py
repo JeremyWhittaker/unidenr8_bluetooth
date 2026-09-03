@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import struct
 from dataclasses import fields
 
 import pytest
@@ -670,12 +671,18 @@ def test_the_raw_hex_is_written_to_the_private_store_owner_only(tmp_path):
 
 
 def test_the_render_says_the_poi_contents_were_not_decoded(tmp_path):
-    """A summary that looked like a parse would invite trusting it."""
+    """A summary that looked like a parse would invite trusting it.
+
+    The render now lists one line per candidate layout (`evaluate_layouts`),
+    not one blessed guess, so the test checks that every layout name is
+    present rather than a single sentence that named none of them.
+    """
     rendered = _inspect(
         _store(tmp_path), RecordingFactory(FakeClient()), confirmed=True
     ).render()
     assert "contents NOT decoded" in rendered
-    assert "candidate record boundar" in rendered
+    for name in inspection.CANDIDATE_LAYOUTS:
+        assert name in rendered
 
 
 def test_nothing_the_command_prints_looks_like_a_position(tmp_path):
@@ -720,16 +727,24 @@ def test_summarise_bytes_on_a_varied_blob_reports_shape_and_not_content():
 
 # ------------------------------------------------------- record boundaries
 
-def test_record_boundaries_stops_at_an_unrecognised_type_byte():
+@pytest.mark.parametrize("layout_name", sorted(inspection.CANDIDATE_LAYOUTS))
+def test_record_boundaries_stops_at_an_unrecognised_type_byte(layout_name):
     """It stops at the first byte it does not know rather than walking on.
 
     Continuing past an unknown marker would produce offsets into bytes nobody
     has established the layout of, printed with the same confidence as the
-    ones that fit.
+    ones that fit.  Checked against every candidate layout -- not just
+    whichever one `record_boundaries` happens to default to -- because a
+    length table is exactly the kind of detail a test can bless by accident.
     """
-    payload = bytes([3]) + b"\x00" * 11 + bytes([0x99]) + b"\x00" * 32
-    walk = inspection.record_boundaries(payload)
-    assert [entry["offset"] for entry in walk] == [0, 12]
+    table = inspection.CANDIDATE_LAYOUTS[layout_name]
+    _, user_mark_length = table[3]
+    payload = (
+        bytes([3]) + b"\x00" * (user_mark_length - 1)
+        + bytes([0x99]) + b"\x00" * 32
+    )
+    walk = inspection.record_boundaries(payload, table)
+    assert [entry["offset"] for entry in walk] == [0, user_mark_length]
     assert walk[0]["kind"] == "user mark"
     assert walk[-1]["kind"] == "unrecognised"
     assert walk[-1]["type_byte"] == "0x99"
@@ -744,36 +759,155 @@ def test_record_boundaries_does_not_walk_off_the_end_of_a_short_blob():
     assert walk[0]["fits"] is False
 
 
-def test_record_boundaries_reports_a_walk_that_consumes_the_whole_blob():
-    """Consuming the blob exactly is weak evidence the candidate layout is right."""
-    payload = bytes([1]) + bytes(range(14)) + bytes([2]) + bytes(range(13))
-    walk = inspection.record_boundaries(payload)
-    assert [entry["offset"] for entry in walk] == [0, 15]
+@pytest.mark.parametrize("layout_name", sorted(inspection.CANDIDATE_LAYOUTS))
+def test_record_boundaries_reports_a_walk_that_consumes_the_whole_blob(layout_name):
+    """Consuming the blob exactly is weak evidence the candidate layout is right.
+
+    Built from each layout's own declared lengths rather than one hardcoded
+    15/14, so this stays true for whichever table is under test instead of
+    only the one `record_boundaries` used to default to.
+    """
+    table = inspection.CANDIDATE_LAYOUTS[layout_name]
+    _, camera_length = table[1]
+    _, redlight_length = table[2]
+    payload = (
+        bytes([1]) + bytes(range(camera_length - 1))
+        + bytes([2]) + bytes(range(redlight_length - 1))
+    )
+    walk = inspection.record_boundaries(payload, table)
+    assert [entry["offset"] for entry in walk] == [0, camera_length]
     assert all(entry["fits"] for entry in walk)
     assert not [entry for entry in walk if entry["kind"] == "unrecognised"]
 
 
-def test_record_boundaries_never_returns_a_coordinate():
+#: Every key either `record_boundaries` or `evaluate_layouts` puts into a
+#: returned dict.  One shared whitelist so a coordinate that slipped into
+#: either function's output would be caught by the same check.
+_BOUNDARY_AND_LAYOUT_KEYS = {
+    "offset", "type_byte", "kind", "candidate_length", "fits", "note",
+    "layout", "record_lengths", "records", "all_fit", "bytes_consumed",
+    "bytes_total", "complete", "exact", "stopped_at",
+}
+
+
+@pytest.mark.parametrize("layout_name", sorted(inspection.CANDIDATE_LAYOUTS))
+def test_record_boundaries_never_returns_a_coordinate(layout_name):
     """Offsets and lengths are not addresses.  Nothing here is decoded.
 
     Upstream published a candidate layout with big-endian floats at two
     offsets.  Reading those would produce coordinates -- home, work, the roads
     Jeremy drives -- from bytes nobody has verified, so no float is produced
-    at all.
+    at all, in either candidate layout's output or `evaluate_layouts`'s
+    summary of it.
     """
-    payload = bytes([1]) + bytes(range(14)) + bytes([3]) + bytes(range(11))
-    walk = inspection.record_boundaries(payload)
+    table = inspection.CANDIDATE_LAYOUTS[layout_name]
+    _, camera_length = table[1]
+    _, mark_length = table[3]
+    payload = (
+        bytes([1]) + bytes(range(camera_length - 1))
+        + bytes([3]) + bytes(range(mark_length - 1))
+    )
+    walk = inspection.record_boundaries(payload, table)
     assert walk
     assert not looks_like_position(walk)
     assert not [value for entry in walk for value in entry.values()
                 if isinstance(value, float)]
-    permitted = {"offset", "type_byte", "kind", "candidate_length", "fits", "note"}
     for entry in walk:
-        assert set(entry) <= permitted, entry
+        assert set(entry) <= _BOUNDARY_AND_LAYOUT_KEYS, entry
+
+    verdicts = inspection.evaluate_layouts(payload)
+    assert not [value for verdict in verdicts for value in verdict.values()
+                if isinstance(value, float)]
+    for verdict in verdicts:
+        assert set(verdict) <= _BOUNDARY_AND_LAYOUT_KEYS, verdict
 
 
 def test_record_boundaries_on_an_empty_blob_suggests_nothing():
     assert inspection.record_boundaries(b"") == []
+
+
+# ------------------------------------------------------- evaluating layouts
+
+def test_evaluate_layouts_picks_whole_record_when_the_blob_is_built_that_way():
+    """A blob written in one layout desynchronises almost immediately under the other.
+
+    Two 10-byte user marks and one 13-byte speed camera, laid out the way
+    ``whole-record`` (13/12/10) reads the type byte -- that table must
+    consume the blob exactly, and ``payload-plus-header`` (15/14/12), reading
+    the same bytes on the wrong assumption, must desynchronise and stop
+    short.  This is the measurement `evaluate_layouts` exists to make: which
+    of the two competing readings of upstream's numbers is the one this R8
+    actually produces.
+    """
+    blob = (
+        (bytes([3, 0]) + struct.pack(">ff", 33.1, -112.1)) * 2
+        + bytes([1, 0]) + struct.pack(">ff", 33.3, -112.3)
+        + struct.pack(">H", 90) + bytes([65])
+    )
+    assert len(blob) == 33
+    verdicts = {v["layout"]: v for v in inspection.evaluate_layouts(blob)}
+
+    whole_record = verdicts["whole-record"]
+    assert whole_record["exact"] is True
+    assert whole_record["records"] == 3
+    assert whole_record["bytes_consumed"] == 33
+
+    payload_plus_header = verdicts["payload-plus-header"]
+    assert payload_plus_header["exact"] is False
+    assert payload_plus_header["stopped_at"] is not None
+
+
+def test_evaluate_layouts_picks_payload_plus_header_when_the_blob_is_built_that_way():
+    """The reverse of the case above: the discriminator has to cut both ways.
+
+    A layout table that always reported "exact" would not be evidence of
+    anything; it has to be capable of saying no, and it has to say no to the
+    layout the blob was *not* built for.
+    """
+    blob = (
+        (bytes([3, 0]) + struct.pack(">ff", 33.1, -112.1) + bytes([0, 0])) * 2
+        + bytes([1, 0]) + struct.pack(">ff", 33.3, -112.3)
+        + struct.pack(">H", 90) + bytes([65, 0, 0])
+    )
+    assert len(blob) == 39
+    verdicts = {v["layout"]: v for v in inspection.evaluate_layouts(blob)}
+
+    payload_plus_header = verdicts["payload-plus-header"]
+    assert payload_plus_header["exact"] is True
+    assert payload_plus_header["records"] == 3
+    assert payload_plus_header["bytes_consumed"] == 39
+
+    whole_record = verdicts["whole-record"]
+    assert whole_record["exact"] is False
+    assert whole_record["stopped_at"] is not None
+
+
+def test_a_record_that_would_run_past_the_end_of_the_blob_is_not_a_completed_walk():
+    """An overshooting record must not be graded as a walk that finished cleanly.
+
+    One well-formed user mark followed by a speed-camera marker with only 4
+    bytes left -- nowhere near its declared 13 -- is exactly the shape that
+    used to let ``offset += length`` step past the end of the blob and stop
+    the loop with no sign anything had gone wrong.  Getting this wrong would
+    let a truncated, half-read POI database be reported the same way as one
+    that was read in full: the last record is expected here with
+    ``fits=False``, and `evaluate_layouts` is expected to say, in its
+    ``complete`` field, that this walk did not finish -- not merely that it
+    was not ``exact``.
+    """
+    table = inspection.CANDIDATE_LAYOUTS["whole-record"]
+    payload = bytes([3]) + bytes(9) + bytes([1]) + bytes(4)
+
+    walk = inspection.record_boundaries(payload, table)
+    assert walk[-1]["kind"] == "speed camera"
+    assert walk[-1]["fits"] is False
+
+    verdict = next(
+        v for v in inspection.evaluate_layouts(payload) if v["layout"] == "whole-record"
+    )
+    assert verdict["all_fit"] is False
+    assert verdict["exact"] is False
+    assert verdict["complete"] is False
 
 
 # ----------------------------------------------------------- the bad cases

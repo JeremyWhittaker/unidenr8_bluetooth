@@ -243,6 +243,15 @@ device is an injection surface however unlikely that seems here. The rejected
 text is not lost — it stays in the private raw capture, which is where an
 unexpected string belongs.
 
+`_safe_word` is the **single-field** sanitiser. A *group* — a comma-separated
+sub-structure such as telemetry field 1 — goes through `_safe_group` instead,
+which applies exactly the same rules to each sub-field and rejoins them. The
+distinction is not cosmetic: a comma is not alphanumeric, so running a whole
+group through `_safe_word` rejected it wholesale and discarded the content. That
+is what used to happen to every active POI warning. `_safe_group` also bounds
+the number of parts, and one bad sub-field still refuses the whole group rather
+than emitting a partial one, because a half-sanitised value looks trustworthy.
+
 ### 3.3 The GPS sub-group: field 2, four comma fields
 
 This is the sub-group that decides what this project can and cannot say about
@@ -322,10 +331,18 @@ detector. The active form is upstream's reading of the decompiled app.
 `_parse_poi_group` therefore decodes no further than "something is being warned
 about", plus at most 48 characters of validated text:
 
-| Field 1 | `PoiWarning.active` | `PoiWarning.raw` |
-|---|---|---|
-| `0` or empty | `False` | `None` |
-| anything else | `True` | `_safe_word(limit=48)` of the whole group |
+| Field 1 | `PoiWarning.active` | `PoiWarning.raw` | `PoiWarning.suspect_pair` |
+|---|---|---|---|
+| `0` or empty | `False` | `None` | `False` |
+| two adjacent sub-fields both look like decimal degrees | `True` | `None` | `True` |
+| anything else | `True` | `_safe_group(limit=48)` of the group | `False` |
+
+The coordinate tripwire on the third row is the same mechanism the GPS group
+has, and it is here for a stronger reason: POI is the characteristic that holds
+saved camera locations and user marks, so if a warning ever carries the position
+of the thing being warned about, that is the most sensitive text the detector
+sends. If it fires, the text is withheld and the documentation is what needs
+correcting.
 
 `detailed()` reports `"decoded": None` explicitly. A structure nobody has ever
 seen populated does not get a parser that can appear to succeed. Schema 1

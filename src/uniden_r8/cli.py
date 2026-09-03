@@ -45,6 +45,7 @@ import asyncio
 import json
 import math
 import sys
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -216,6 +217,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--confirm", action="store_true",
         help="required: this reads the POI database, which holds saved camera "
              "locations and user marks",
+    )
+
+    poi_diff_parser = sub.add_parser(
+        "poi-diff",
+        help="compare two POI captures from the private store; no radio, "
+             "and no coordinate is ever printed",
+    )
+    poi_diff_parser.add_argument(
+        "before", help="capture name written by an earlier `inspect --confirm`"
+    )
+    poi_diff_parser.add_argument("after", help="the capture taken after it")
+    poi_diff_parser.add_argument(
+        "--reference-file",
+        help="a private JSON file holding {\"lat\": .., \"lon\": ..} -- the "
+             "operator's own trusted fix. Passed as a file rather than as "
+             "arguments so a coordinate never enters a command line or a shell "
+             "history. Only the distance from it is ever reported.",
+    )
+    poi_diff_parser.add_argument(
+        "--json", action="store_true", help="emit the summary as JSON"
     )
 
     history_parser = sub.add_parser(
@@ -594,11 +615,41 @@ def _cmd_collect(state_dir: str | None, duration: float | None,
         )
     resolved = settings.collector.state_dir
 
-    try:
-        address = bonded_detector_address()
-    except (LookupError, PairingRefused) as exc:
-        print(publish(str(exc)), file=sys.stderr)
-        return 1
+    # Resolving the bond is the one step that sits outside the collector's own
+    # retry loop, and on a cold boot it is a race: `After=bluetooth.service`
+    # orders after bluetoothd's start job, not after BlueZ has read
+    # /var/lib/bluetooth and published the bonded device on D-Bus.  Failing here
+    # used to exit 1, which under `Restart=always` burns the unit's start limit
+    # in about two minutes and leaves systemd refusing to start it again for the
+    # rest of the hour -- so a Pi that boots with the truck loses the whole
+    # drive, silently, to a few seconds of start-up ordering.
+    #
+    # A continuous collector therefore waits rather than exiting.  The process
+    # stays up, systemd stays satisfied, journald carries the reason, and the
+    # moment the bond appears it proceeds.  A bounded trial still fails fast: a
+    # trial that hangs is worse than one that reports.
+    address = None
+    waited = 0
+    while address is None:
+        try:
+            address = bonded_detector_address()
+        except (LookupError, PairingRefused) as exc:
+            if duration is not None:
+                print(publish(str(exc)), file=sys.stderr)
+                return 1
+            delay = min(60.0, 2.0 * (2 ** min(waited, 5)))
+            if waited == 0 or waited % 10 == 0:
+                # Not on every attempt: at one line a minute, a night parked
+                # would leave nothing else in the journal.
+                print(
+                    f"{publish(str(exc))}; waiting {delay:g}s for the bond",
+                    file=sys.stderr,
+                )
+            waited += 1
+            try:
+                time.sleep(delay)
+            except KeyboardInterrupt:
+                return 0
 
     lock = SingleInstanceLock(Path(resolved) / "collector.lock")
     try:
@@ -664,6 +715,60 @@ def _cmd_inspect(store_path: str, confirmed: bool, settings) -> int:
     return 0 if result.compatible else 1
 
 
+def _cmd_poi_diff(store_path: str, before: str, after: str,
+                  reference_file: str | None, as_json: bool) -> int:
+    """Compare two POI captures already in the private store.
+
+    Touches no radio.  Prints structure, record counts, layout verdicts and --
+    when the operator supplies a reference fix privately -- a distance in
+    metres.  It never prints a coordinate, and the reference is read from a file
+    rather than from arguments so that one cannot land in a shell history
+    either.
+
+    This is the offline half of the user-mark experiment in
+    ``docs/VALIDATION.md`` V8: read, press MARK once, read again, diff.
+    """
+    from .poi_diff import diff_payloads
+
+    store = PrivateStore(store_path).ensure()
+
+    def load(name: str) -> bytes | None:
+        try:
+            document = store.read_json(name)
+        except (OSError, ValueError) as exc:
+            print(f"cannot read capture {name}: {type(exc).__name__}",
+                  file=sys.stderr)
+            return None
+        for attribute in document.get("attributes", []):
+            if attribute.get("sensitive") and attribute.get("hex"):
+                return bytes.fromhex(attribute["hex"])
+        print(f"capture {name} holds no POI payload", file=sys.stderr)
+        return None
+
+    first, second = load(before), load(after)
+    if first is None or second is None:
+        return 1
+
+    reference = None
+    if reference_file:
+        try:
+            document = json.loads(Path(reference_file).read_text(encoding="utf-8"))
+            reference = (float(document["lat"]), float(document["lon"]))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            # Deliberately no value in the message: this file is the one place a
+            # coordinate is allowed to sit, and an error string is not.
+            print(f"cannot read the reference fix: {type(exc).__name__}",
+                  file=sys.stderr)
+            return 1
+
+    result = diff_payloads(first, second, reference)
+    if as_json:
+        print(publish(json.dumps(result.summary(), indent=2)))
+    else:
+        print(publish(result.render()))
+    return 0
+
+
 def _cmd_history(what: str, limit: int, as_json: bool, settings,
                  full: bool = False) -> int:
     """Read the local history.  No radio, no detector, no network."""
@@ -697,15 +802,22 @@ def _cmd_history(what: str, limit: int, as_json: bool, settings,
             for row in rows
         ]
 
+    if not full:
+        # Gate the structured rows once, before the rendering branch, rather
+        # than gating each rendering.  `publish()` only walks *keys* when it is
+        # handed JSON; a rendered table is flat text, so on that branch it falls
+        # back to the decimal-pair regex and a lone latitude column would pass.
+        # The two branches were not equally protected, which is exactly the kind
+        # of asymmetry a defence-in-depth check exists to not have.
+        publish(json.dumps(rows, default=str))
+
     if as_json:
-        rendered = json.dumps(rows, indent=2, default=str)
-        print(rendered if full else publish(rendered))
+        print(json.dumps(rows, indent=2, default=str))
         return 0
     if not rows:
         print(f"no {what} recorded")
         return 0
-    rendered = _render_rows(what, rows)
-    print(rendered if full else publish(rendered))
+    print(_render_rows(what, rows))
     return 0
 
 
@@ -813,6 +925,11 @@ def main(argv: list[str] | None = None) -> int:  # noqa: PLR0911 - one per comma
         return _cmd_collect(args.state_dir, args.duration, settings)
     if args.command == "inspect":
         return _cmd_inspect(args.store, args.confirm, settings)
+    if args.command == "poi-diff":
+        return _cmd_poi_diff(
+            args.store, args.before, args.after,
+            args.reference_file, args.json,
+        )
     if args.command == "history":
         return _cmd_history(args.what, args.limit, args.json, settings, args.full)
     return 2  # pragma: no cover - argparse rejects unknown subcommands first

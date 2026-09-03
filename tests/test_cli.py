@@ -135,6 +135,10 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     the latter two also write a CCCD to subscribe. None of them writes a value
     to a vendor characteristic, which is the invariant.
 
+    `history`, `config` and `poi-diff` touch no radio at all -- `poi-diff`
+    compares two captures that already exist on disk, which is the whole reason
+    the coordinate experiment needs no write path.
+
     The set is pinned so a new subcommand has to be justified here rather than
     appearing silently.
     """
@@ -143,7 +147,7 @@ def test_the_cli_exposes_no_subcommand_that_transmits_to_the_detector():
     assert actions, "expected a subcommand action"
     assert set(actions[0].choices) == {
         "plan", "selftest", "scan", "pair", "identity", "live", "collect",
-        "inspect", "history", "config",
+        "inspect", "history", "config", "poi-diff",
     }
 
 
@@ -161,11 +165,22 @@ def test_inspect_refuses_without_explicit_confirmation(capsys):
 
 
 def test_the_offline_commands_need_no_radio_and_no_detector(capsys, tmp_path):
-    """`history` and `config` must work on a machine with no Bluetooth."""
+    """`history` and `config` must work on a machine with no Bluetooth.
+
+    The "no database yet" case is pointed at an explicit, empty tmp_path
+    rather than the default `.state/history.db`: that default resolves
+    against the process's cwd, so leaving it implicit would pass only on a
+    machine where nobody had ever run the tool from the repo root.
+    """
     assert cli.main(["--config", str(tmp_path / "absent.toml"), "config"]) == 2
     assert cli.main(["config", "--example"]) == 0
     assert "[collector]" in capsys.readouterr().out
-    assert cli.main(["history"]) == 1  # no database yet, reported not raised
+
+    written = tmp_path / "offline.toml"
+    written.write_text(
+        f'[history]\npath = "{tmp_path / "history.db"}"\n', encoding="utf-8"
+    )
+    assert cli.main(["--config", str(written), "history"]) == 1
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "-inf"])

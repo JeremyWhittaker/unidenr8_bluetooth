@@ -1,32 +1,26 @@
 # Uniden R8 background collector.
 #
-# NOT INSTALLED BY ANY SCRIPT IN THIS REPOSITORY, and deliberately so. Copy it
-# into place by hand, once, after a bounded trial has been watched:
+# INSTALL IT WITH THE SCRIPT, NOT BY HAND:
 #
-#     sudo install -m 0644 systemd/unidenr8-collector.service /etc/systemd/system/
-#     sudo systemctl daemon-reload
-#     sudo systemctl start unidenr8-collector      # start, and watch it
-#     systemctl status unidenr8-collector
+#     ./scripts/install-service.sh              # install, enable at boot, start
+#     ./scripts/install-service.sh --dry-run    # print the rendered unit only
+#     ./scripts/uninstall-service.sh            # stop and remove it
 #
-# Enable it at boot only after that has been observed through a real drive.
+# The script derives User=, WorkingDirectory=, ExecStart=, PYTHONPATH,
+# UNIDEN_R8_CONFIG and ReadWritePaths= from the tree it is run out of and from
+# the node's own configuration file, then verifies the result against the
+# telemetry counter rather than against systemd's opinion of the process.
 #
-# ---------------------------------------------------------------------------
-# BEFORE YOU INSTALL THIS, EDIT FOUR THINGS
-#
-#   1. User=                 the account that owns the venv and the bond
-#   2. WorkingDirectory=     where you cloned this repository
-#   3. ExecStart=            the same path, plus /.venv/bin/python
-#   4. ReadWritePaths=       the state directory from your config file
-#
-# and one more if your node has no OBDLink: set `guard = false` under [obd] in
-# the configuration file, or this will refuse to run and be right to.
-# ---------------------------------------------------------------------------
+# The paths below are this project's own node and are placeholders. Installing
+# this file unmodified on any other host produces a service that starts, reports
+# `active (running)`, and does nothing -- which is the failure mode the script
+# exists to remove.
 #
 # It deliberately does NOT Require or Want the RFCOMM unit. Ordering after it is
 # useful; pulling it in is not this unit's business, and a unit that can start
 # the vehicle's RFCOMM binding is a unit that can interfere with it. The
 # collector checks the OBDLink's health itself, read-only, and pauses when it is
-# unhealthy — that check is the real protection, not a dependency edge.
+# unhealthy -- that check is the real protection, not a dependency edge.
 
 [Unit]
 Description=Uniden R8 BLE collector (receive-only, publishes state and events)
@@ -44,6 +38,7 @@ StartLimitBurst=5
 [Service]
 Type=simple
 User=jeremy
+Group=jeremy
 WorkingDirectory=/home/jeremy/unidenr8
 Environment=PYTHONPATH=/home/jeremy/unidenr8/src
 Environment=PYTHONUNBUFFERED=1
@@ -54,9 +49,12 @@ Environment=UNIDEN_R8_CONFIG=/home/jeremy/unidenr8/unidenr8.toml
 UMask=0077
 ExecStart=/home/jeremy/unidenr8/.venv/bin/python -m uniden_r8.cli collect
 
-# A crash should be recovered; the collector's own clean exit should not be
-# restarted into a loop.
-Restart=on-failure
+# `always`, not `on-failure`. In continuous mode the collector has no clean
+# self-exit: it loops over connect/stream/backoff until it is signalled, so an
+# exit of any kind means something went wrong and the vehicle is unattended.
+# `systemctl stop` and `restart` are unaffected -- systemd does not re-trigger a
+# unit it stopped itself. StartLimitBurst above is what stops a hot loop.
+Restart=always
 RestartSec=30
 
 # SIGTERM must have time to unsubscribe, release the link, end any open alert
@@ -86,12 +84,21 @@ RestrictRealtime=true
 LockPersonality=true
 SystemCallArchitectures=native
 # The collector talks to BlueZ over the system D-Bus, to gpsd and to an MQTT
-# broker over TCP, and binds a loopback port for the optional feed. It needs no
-# other address family, and none of those needs raw sockets.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# broker over TCP, and binds a loopback port for the optional feed.
+#
+# AF_BLUETOOTH is here for the OBD guard, not for the detector. The BLE link is
+# D-Bus (AF_UNIX), but the guard shells out to `rfcomm` to read which device
+# nodes are bound, and that tool opens
+# `socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM)` -- measured with strace on
+# the node, not assumed. Without AF_BLUETOOTH that socket call fails, `rfcomm`
+# lists nothing, the guard reads "not bound", and the collector sits in
+# `obd-blocked` forever while systemd reports `active (running)`. It captures
+# nothing and looks healthy doing it. Do not remove this line to tighten the
+# sandbox; removing it does not tighten anything, it just breaks the guard.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK AF_BLUETOOTH
 
 [Install]
-# This makes an explicit `systemctl enable` possible; nothing in this project
-# invokes it. Do that only after a drive with active OBD polling has also been
-# observed, which a parked trial does not establish.
+# `./scripts/install-service.sh` enables this by default, because a collector
+# that has to be started by hand is a collector that is not running during the
+# drive you wanted to capture. Pass --no-enable to install without it.
 WantedBy=multi-user.target

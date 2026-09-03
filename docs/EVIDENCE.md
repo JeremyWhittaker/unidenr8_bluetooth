@@ -639,3 +639,150 @@ RFCOMM link was bound and idle. §8's two limits stand unchanged, and V10 — on
 to two hours of coexistence under real polling — is still the gate before the
 service is enabled at boot.
 
+
+---
+
+## 11. The service build — measurements made while the vehicle was running
+
+Session of 2026-09-03, on the target Pi, with the truck powered and the RFCOMM
+binding active. This section records what was *measured*; the reasoning that
+sits on top of it is in `docs/HANDOFF.md`.
+
+### 11.1 The drive of 2026-09-02 produced no data at all — OBSERVED
+
+Jeremy drove roughly 17:00–19:30 local. The history database's newest write was
+**15:31**, before departure. There was no `unidenr8-collector` unit installed on
+the node (`systemctl list-unit-files` had no match), no collector process
+(`pgrep`), and no journal entry mentioning the project in that window.
+
+Nothing was captured, and nothing was broken: the collector simply was not
+running, because the repository shipped a unit template that no script installed
+and a runbook that said not to enable it. The cost of that decision is now
+measured at one 2.5-hour drive.
+
+`scripts/install-service.sh` exists because of this.
+
+### 11.2 The unit's own sandbox would have blocked the OBD guard — OBSERVED
+
+**This is the finding that mattered most, and it was found before the unit was
+installed rather than after.**
+
+The shipped unit carried
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK`. The OBD guard
+shells out to `rfcomm` to read which device nodes are bound. On the node:
+
+```
+$ strace -f -e trace=socket rfcomm
+socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM) = 3
+```
+
+`AF_BLUETOOTH` was not in the allow-list. Under that sandbox the socket call
+fails, `rfcomm` lists nothing, the guard reads "not bound", and the collector
+waits in `obd-blocked` **forever** — while `systemctl status` reports
+`active (running)`.
+
+A service that is healthy by every signal systemd offers and captures nothing is
+the worst available failure, because it is invisible. `AF_BLUETOOTH` is now in
+the allow-list, with a comment saying why it must not be removed to "tighten"
+the sandbox.
+
+Measured with `strace`, on the node, against the real binary. Not inferred.
+
+### 11.3 `rfcomm` exits 0 when it can list bindings — OBSERVED
+
+`rfcomm; echo $?` → `0`, with a binding present. This is what makes it safe for
+the guard to treat a non-zero exit as "the tool could not run" rather than as
+"nothing is bound" — two states that were previously reported identically, which
+sends an operator to inspect the vehicle's link when the fault is on the host.
+
+### 11.4 The detector's motion fields were not being recorded — OBSERVED
+
+`history.record_detector_motion` defaults to **off**, and the node's
+configuration had taken that default. The `telemetry` table's `direction_8`,
+`speed_mph` and `altitude_ft` columns were therefore empty on every row written
+before this session.
+
+A drive undertaken to validate the detector's heading, speed and altitude would
+have produced a database containing none of them. The default is right for
+privacy and wrong for the one job the drive exists to do, which makes it a
+configuration decision that has to be made deliberately and written down — see
+`docs/CONFIGURATION.md`, "A validation drive".
+
+With it enabled and `telemetry_every_seconds = 1.0`, 227 rows carrying heading,
+speed and altitude were recorded in the first four minutes.
+
+### 11.5 Altitude is consistent with feet and not with metres — INFERENCE
+
+Parked, the detector reported an altitude of **1266**. Upstream documents this
+field as feet. The test location's true elevation is within a few hundred feet
+of that figure; read as metres the same number would place the vehicle roughly
+four thousand feet up, which it demonstrably was not.
+
+This is **not** a measurement against a reference altimeter, and it is graded
+INFERENCE deliberately: it is one reading at one place, and it rules out metres
+far more strongly than it establishes feet. V1 — a drive with a reference GNSS —
+is still what promotes it. It is recorded because it is the first evidence of
+any kind about that field's units from this detector.
+
+The location itself is not recorded here, in this repository, or in any
+published output. Only the relation is.
+
+### 11.6 Live telemetry, re-confirmed under the service configuration — OBSERVED
+
+Continuous collector, truck running, RFCOMM bound and active:
+
+| | |
+|---|---|
+| Telemetry packets | 505, then 242 in a second session |
+| Unparsed | **0** |
+| Voltage | 13.6–13.7 V, engine running |
+| GPS state | locked throughout |
+| Detector heading | reported while stationary (`S`) |
+| Alert packets | 1 — the all-clear read, as in §10.11 |
+| OBD invariants | `hummer-rfcomm` active, `rfcomm0:` bound, unchanged across the session |
+
+### 11.7 The POI record layout is now two graded hypotheses, not one — INFERENCE
+
+Upstream published the numbers 13, 12 and 10 for the three POI record types.
+This project had been reading them as *payload* sizes following a type byte and
+an unknown byte, giving whole records of 15/14/12. A field-by-field count of
+Uniden's current app supports reading them as the *whole* record length already:
+`type(1) + unknown(1) + lat f32(4) + lon f32(4) + angle u16(2) + speed(1) = 13`,
+12 without the speed byte, 10 for a bare user mark. That arithmetic is
+self-consistent.
+
+Neither reading has been checked against a populated POI database on any
+detector, so this project now holds **both**, separately graded:
+
+| Layout | Lengths | Grade |
+|---|---|---|
+| `whole-record` | 13 / 12 / 10 | UPSTREAM-UNVERIFIED |
+| `payload-plus-header` | 15 / 14 / 12 | INFERENCE — this project's reading |
+
+`inspection.evaluate_layouts()` runs every candidate against the bytes and
+reports which one consumes the blob **exactly**. On a blob synthesised to the
+13/12/10 reading it returns `whole-record: 3 records, 33/33 bytes, exact` and
+`payload-plus-header: 1 record, walk stopped at offset 12` — a decisive verdict
+either way, which a single blessed length table could not produce.
+
+Swapping one guess for the other would have destroyed the record of the
+disagreement without producing any evidence. The tool decides now, and one
+capture settles it.
+
+### 11.8 What this session still did not establish
+
+**No active alert.** Unchanged, and still the largest gap. V2.
+
+**No motion.** The vehicle was parked for the whole session. Speed read 0–3 while
+stationary; heading, speed and altitude remain unvalidated against a reference.
+V1.
+
+**No POI, settings or descriptor read.** `inspect` was still not run. It reads
+saved camera locations and user marks, and that decision remains Jeremy's to
+make explicitly.
+
+**No coordinates from the detector, and no new reason to expect them in
+telemetry.** §10.8 stands: the GPS sub-group's first field is a compass point
+and the coordinate tripwire did not fire. What is now *also* true is that this
+is a statement about the **live telemetry packet only** — see `README.md` and
+§11.7 for the stored-record question, which is open and testable.

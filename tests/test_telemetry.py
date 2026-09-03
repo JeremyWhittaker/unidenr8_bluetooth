@@ -68,6 +68,170 @@ def test_a_laser_alert_does_not_invent_a_frequency():
     assert alert.frequency_ghz is None
 
 
+def test_laser_still_yields_a_gun_id_and_no_frequency():
+    """The laser branch of the field-5 split must survive the gate rewrite.
+
+    The gate that used to reject an unfamiliar band, direction or raw signal
+    is gone, but the tagged-union split on field 5 is unchanged: laser still
+    reads it as a gun identifier, never as a frequency. Losing this would
+    make every laser detection either invent a bogus GHz reading or drop the
+    gun identifier silently.
+    """
+    alert = telemetry.parse_alerts(b"1,00,LASER,8,0,5,F,1&0&0&0")[0]
+    assert alert.laser_gun_id == 5
+    assert alert.frequency_ghz is None
+    assert alert.band_recognised is True
+
+
+def test_a_known_band_still_sets_the_frequency_exactly_as_before():
+    """The leniency added for unfamiliar values must not weaken the normal path.
+
+    A band this project has already documented is still looked up by name,
+    and field 5 is still read as GHz for it -- proving the new
+    `band_recognised` branch only changes behaviour for bands that are
+    actually unfamiliar.
+    """
+    alert = telemetry.parse_alerts(ALERT_PACKET)[0]
+    assert alert.band == "KA"
+    assert alert.band_recognised is True
+    assert alert.frequency_ghz == 33.785
+
+
+def test_a_lowercase_direction_code_no_longer_discards_the_detection():
+    """Regression test for a real bug: a lowercase code used to lose the alert.
+
+    Only `band` was case-normalised before; `direction` was not, so a
+    detector sending `r` instead of `R` failed the old direction check and
+    the *entire* detection was thrown away, on a detector that has never
+    produced one to lose. `direction` is now `.strip().upper()`ed exactly
+    like `band`, so a lowercase code decodes the same as its uppercase form.
+    """
+    alert = telemetry.parse_alerts(b"1,00,KA,3,33,33.7850,r,1&0&0&0")[0]
+    assert alert.direction == "R"
+    assert alert.direction_name == "rear"
+
+
+def test_an_unfamiliar_band_is_published_with_field_5_left_uninterpreted():
+    """An unfamiliar band is data, not a reason to discard the detection.
+
+    `frequency_ghz` and `laser_gun_id` are both keyed on the band: an unknown
+    band selects neither branch, because guessing which one would either
+    invent a frequency out of a gun-type code or vice versa. `field_5_raw`
+    is the one thing that always survives, so nothing is lost even though
+    nothing is interpreted.
+    """
+    alert = telemetry.parse_alerts(b"1,00,MYSTERY,3,33,33.7850,R,1&0&0&0")[0]
+    assert alert.band == "MYSTERY"
+    assert alert.band_recognised is False
+    assert alert.frequency_ghz is None
+    assert alert.laser_gun_id is None
+    assert alert.field_5_raw == "33.7850"
+
+
+def test_a_non_integer_raw_signal_keeps_the_detection_with_signal_none():
+    """The raw signal's scale was never established on this product either.
+
+    Requiring it to parse as an integer used to reject the whole slot over a
+    field whose meaning is not even documented here. It is now just another
+    value that can come back unknown without taking the detection with it.
+    """
+    alert = telemetry.parse_alerts(b"1,00,KA,3,not-a-number,33.7850,R,1&0&0&0")[0]
+    assert alert.signal is None
+    assert alert.band == "KA"
+    assert alert.strength == 3
+
+
+def test_a_band_that_cannot_be_sanitised_still_rejects_the_slot():
+    """The new leniency has a floor: an unsanitisable string is not a band.
+
+    An unfamiliar band survives if `_safe_word` accepts it; one that carries
+    a character no field of this protocol should carry -- here, angle
+    brackets -- still rejects the slot outright, exactly as an unreadable
+    field always has. Leniency about vocabulary is not leniency about
+    injection.
+    """
+    assert telemetry.parse_alerts(b"1,00,K<A>,3,33,33.7850,R,1&0&0&0") == []
+
+
+@pytest.mark.parametrize("payload", [
+    b"1,00,KA,9,33,33.7850,R,1&0&0&0",
+    b"2,00,KA,3,33,33.7850,R,1&0&0&0",
+    b"1,00,KA,3,33,33.7850,R&0&0&0",
+])
+def test_a_structurally_invalid_slot_still_rejects_the_detection(payload):
+    """The gate is structural, and the structure is still enforced.
+
+    A strength outside 1..8, an active marker that is not `1`, and fewer
+    than eight comma-fields are the three checks the rewrite kept, exactly
+    because they describe the shape of a slot rather than a vocabulary
+    borrowed from a different product. Any of the three must still refuse
+    the slot, or "structural only" would mean "no gate at all".
+    """
+    assert telemetry.parse_alerts(payload) == []
+
+
+def test_the_all_clear_form_still_parses_as_recognised_with_no_alerts():
+    """The one packet this detector has actually produced must still work.
+
+    Every change above loosens the gate for a *detection*; this proves none
+    of it disturbed the all-clear shape, which is the only shape confirmed
+    on real hardware. `recognised` must stay true and `alerts` empty, not
+    merely "not crash".
+    """
+    snapshot = telemetry.parse_alert_snapshot(CLEAR_PACKET)
+    assert snapshot.recognised is True
+    assert snapshot.alerts == []
+
+
+def test_an_unreadable_slot_carries_its_sanitised_text_in_slot_raw():
+    """A rejected slot used to leave nothing but a counter.
+
+    That was the worst possible outcome for a detector that has never
+    produced a real alert: the one packet that would explain why the parser
+    is wrong was the one packet the parser discarded. A slot short of the
+    required eight fields is still rejected, but its sanitised text is now
+    kept on `Slot.raw` rather than thrown away.
+    """
+    snapshot = telemetry.parse_alert_snapshot(b"1,00,KA,3,33,33.7850,R&0&0&0")
+    slot = snapshot.slots[0]
+    assert slot.state == telemetry.SLOT_UNREADABLE
+    assert slot.raw == "1,00,KA,3,33,33.7850,R"
+
+
+def test_an_unsanitisable_unreadable_slot_carries_a_shape_not_the_device_text():
+    """The device's own characters must never reach `Slot.raw`.
+
+    A slot that fails to sanitise still needs to be diagnosable, so
+    `_describe_unreadable` falls back to a *shape* description -- field
+    count and offending character classes -- and this checks that fallback
+    for the specific device-supplied substring it must never contain, not
+    merely that some string came back.
+    """
+    snapshot = telemetry.parse_alert_snapshot(
+        b"<script>,00,KA,3,33,33.7850,R,1&0&0&0"
+    )
+    slot = snapshot.slots[0]
+    assert slot.state == telemetry.SLOT_UNREADABLE
+    assert slot.raw is not None
+    assert "script" not in slot.raw
+    assert "<script>" not in slot.raw
+    assert "markup" in slot.raw
+
+
+def test_a_genuinely_unreadable_slot_still_marks_the_snapshot_unrecognised():
+    """`recognised` and `rejected_slots` are the tracker's only signal to hold on.
+
+    A snapshot with one bad slot must still say so at the snapshot level --
+    not just describe the slot -- because it is `recognised` the tracker
+    reads to decide whether an open threat may safely be ended.
+    """
+    snapshot = telemetry.parse_alert_snapshot(
+        b"<script>,00,KA,3,33,33.7850,R,1&0&0&0"
+    )
+    assert snapshot.recognised is False
+    assert snapshot.rejected_slots == 1
+
+
 @pytest.mark.parametrize("payload", [
     b"", b"\xff\xfe\x00", b"garbage", b"1&2", b"&&&&", "12.1",
     bytes(range(32)),
@@ -123,9 +287,30 @@ def test_the_schema_one_document_refuses_an_unconfirmed_shape():
     assert document["telemetry"]["shape_confirmed"] is False
 
 
-def test_an_unknown_alert_band_is_not_reflected_into_public_output():
-    payload = b"1,00,PRIVATE-NOTE,3,33,33.7850,R,1&0&0&0"
-    assert telemetry.parse_alerts(payload) == []
+def test_an_unknown_alert_band_is_published_not_discarded():
+    """This assertion used to be the opposite, and the opposite was the bug.
+
+    It asserted `parse_alerts(...) == []` for an unrecognised band, which was
+    correct under the old gate -- and encoded exactly the failure this
+    detector could not afford: every band string on file came from a
+    *different product*, an R8w, and this detector has never produced a real
+    active alert. Rejecting the whole detection over one unfamiliar band
+    would have published "clear" while the detector's own screen showed a
+    real threat. The gate is now structural only, so an unrecognised band
+    that still sanitises is published, marked unrecognised, with field 5 left
+    uninterpreted rather than guessed at.
+
+    The original payload used ``PRIVATE-NOTE``, which is 12 characters --
+    over the band sanitiser's 8-character limit -- so it would still come
+    back empty today, for an unrelated reason that would have hidden this
+    exact regression from anyone re-running the old test unchanged. The band
+    below is shortened so the test actually exercises the behaviour its name
+    claims.
+    """
+    payload = b"1,00,PRIVATE,3,33,33.7850,R,1&0&0&0"
+    alert = telemetry.parse_alerts(payload)[0]
+    assert alert.band == "PRIVATE"
+    assert alert.band_recognised is False
 
 
 # ------------------------------------------------------------ fake client
@@ -447,12 +632,36 @@ def test_the_session_output_carries_no_identifier(tmp_path, monkeypatch):
 
 
 def test_unrecognised_alert_text_stays_private(tmp_path, monkeypatch):
+    """An unfamiliar band is published as a detection, but never as its text.
+
+    Two rules meet here and both have to hold. A band this project has not seen
+    must not discard the detection -- every band string on file came from a
+    different product, so an unfamiliar one is exactly what this detector is
+    expected to produce, and answering "clear" during a real threat is the worst
+    output this parser has. But an arbitrary string from a device must not be
+    reflected into what a person or another program reads.
+
+    So the detection survives (`unparsed_alert_packets` stays 0) and the string
+    does not reach the public render. The sanitised text is still available in
+    the owner-only detailed view, which is where an unexpected value belongs.
+
+    This test previously asserted the packet was *unparsed*. That encoded the
+    bug: the whole detection was thrown away over field 2.
+    """
     payload = b"1,00,PRIVATE-NOTE,3,33,33.7850,R,1&0&0&0"
     client = FakeClient(emit=[(gatt.ALERT_UUID, payload)])
     session, _ = _run(client, 0.01, tmp_path, monkeypatch)
+
     rendered = session.render() + repr(session.as_dict())
     assert "PRIVATE-NOTE" not in rendered
-    assert session.unparsed_alert_packets == 1
+    assert session.unparsed_alert_packets == 0
+    assert len(session.alerts) == 1
+
+    alert = session.alerts[0]
+    assert alert.band_recognised is False
+    assert alert.publishable()["band"] == "unknown"
+    # The text is not lost -- it is owner-only.
+    assert alert.detailed()["band"] == "PRIVATE-NOTE"
 
 
 def test_an_exception_message_is_scrubbed(tmp_path, monkeypatch):
@@ -503,6 +712,95 @@ def test_the_detailed_render_survives_an_active_poi_warning():
     rendered = session.render()
     assert "POI warning active" in rendered
     assert "heading N" in rendered
+
+
+# ------------------------------------------- the POI group sanitiser
+
+def test_an_active_poi_warning_keeps_its_structured_text():
+    """`_safe_group` must not throw away a whole group over one comma.
+
+    `_safe_word` is the right check for a single field and the wrong one for
+    a comma-joined group -- applying it to the whole group turned
+    "SPEEDCAM,500,35" into `None`, discarding the only readable copy of the
+    first real camera warning this project would ever see, since `collect`
+    keeps no raw packets. The conservative schema-1 view stays a bare
+    boolean regardless: a display built against schema 1 must not gain a
+    camera type or a distance just because the parser got better underneath.
+    """
+    reading = telemetry.parse_telemetry(b"11.8&SPEEDCAM,500,35&N,45,312,C&0&5&D&D")
+    assert reading.poi.active is True
+    assert reading.poi.raw == "SPEEDCAM,500,35"
+
+    published = reading.publishable()
+    assert published["poi_warning"] is True
+    assert "SPEEDCAM" not in repr(published)
+
+
+def test_a_poi_group_with_an_unsafe_subfield_is_refused_entirely():
+    """One bad sub-field refuses the whole group rather than leaking a partial one.
+
+    A half-sanitised value that dropped only the unsafe piece would still
+    look trustworthy; `raw` must be `None`, not "SPEEDCAM,,35" with the
+    dangerous piece silently removed.
+    """
+    reading = telemetry.parse_telemetry(
+        b"11.8&SPEEDCAM,<script>,35&N,45,312,C&0&5&D&D"
+    )
+    assert reading.poi.raw is None
+
+
+def test_the_coordinate_tripwire_fires_on_an_adjacent_decimal_degree_pair():
+    """POI is the characteristic that holds saved camera locations and user marks.
+
+    If a POI warning ever carries the position of the thing it is warning
+    about, that would be the most sensitive text the detector sends -- worse
+    than the GPS group's own tripwire, because these coordinates would be a
+    saved place, not merely the vehicle's current one. Two adjacent
+    sub-fields that both read as signed decimal degrees withhold `raw`
+    entirely and set `suspect_pair`, exactly as the GPS group's tripwire
+    does.
+    """
+    reading = telemetry.parse_telemetry(
+        b"11.8&CAM,33.4484,-112.0740&N,45,312,C&0&5&D&D"
+    )
+    assert reading.poi.raw is None
+    assert reading.poi.suspect_pair is True
+
+
+def test_a_poi_group_with_too_many_parts_is_refused():
+    """The part-count bound is real, not merely documented.
+
+    Nine comma-separated parts are well within the 48-character limit, so
+    only the part-count check can be responsible for the refusal.
+    """
+    reading = telemetry.parse_telemetry(
+        b"11.8&A,B,C,D,E,F,G,H,I&N,45,312,C&0&5&D&D"
+    )
+    assert reading.poi.raw is None
+
+
+def test_a_poi_group_longer_than_the_limit_is_refused():
+    """The overall length bound is enforced before anything is rejoined.
+
+    A single over-long sub-field must not slip through because it happens to
+    be alphanumeric.
+    """
+    over_long = "CAM," + "1" * 50
+    reading = telemetry.parse_telemetry(
+        f"11.8&{over_long}&N,45,312,C&0&5&D&D".encode()
+    )
+    assert reading.poi.raw is None
+
+
+def test_an_empty_subfield_does_not_cost_the_whole_group():
+    """Position matters in this wire format, so a blank field is kept, not fatal.
+
+    Dropping the whole group over one empty sub-field would lose the
+    positions of everything after it -- a distance field with no value is
+    still a distance field.
+    """
+    reading = telemetry.parse_telemetry(b"11.8&CAM,,35&N,45,312,C&0&5&D&D")
+    assert reading.poi.raw == "CAM,,35"
 
 
 def test_every_confidence_key_names_something_actually_published():

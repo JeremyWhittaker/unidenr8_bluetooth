@@ -3,8 +3,95 @@
 Notable changes, newest first. Dates are the day the work landed on `main`.
 
 This project versions its *published documents* rather than itself: `state.json` is schema 1 and
-frozen, `state-v2.json` is schema 2, and the SQLite history is schema 2. A consumer should pin the
+frozen, `state-v2.json` is schema 2, and the SQLite history is schema 3. A consumer should pin the
 schema it reads exactly. See [`docs/SCHEMA.md`](docs/SCHEMA.md).
+
+## 2026-09-02 (evening)
+
+### Added
+
+- **`scripts/install-service.sh` and `scripts/uninstall-service.sh`.** The installer templates
+  `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=`, `PYTHONPATH`, `UNIDEN_R8_CONFIG` and
+  `ReadWritePaths=` from the tree it runs out of and the node's own configuration, refuses to
+  install unless `selftest` passes, warns when `[history] enabled` is off or the OBD guard names a
+  unit the host lacks, and verifies success by watching the telemetry counter advance rather than
+  trusting `systemctl is-active`. Idempotent; supports `--dry-run` and `--no-enable`.
+- **`inspection.evaluate_layouts()`.** Runs both graded POI record-layout hypotheses
+  (`whole-record`, 13/12/10; `payload-plus-header`, 15/14/12) against a capture and reports which
+  one, if either, consumes the blob exactly. One capture now settles the question either way.
+- **`uniden-r8 poi-diff` and `uniden_r8.poi_diff`.** Compares two POI captures already in the
+  private store and reports what changed: bytes, record boundaries, which layout fits, and — given
+  a reference fix supplied in a file rather than on a command line — how far the decoded point is
+  from it. It never prints a coordinate. This is the offline half of the user-mark experiment.
+- SQLite history schema 3: `telemetry.poi_raw` and `telemetry.poi_suspect`, with an additive
+  migration from schema 2 so an existing database is upgraded rather than orphaned.
+
+### Fixed
+
+- **A drive captured nothing.** The repository shipped a systemd unit template that no script
+  installed, and the runbook said not to enable it. Measured cost: one 2.5-hour drive with zero
+  data. `scripts/install-service.sh` exists because of this (`docs/EVIDENCE.md` §11.1).
+- **The unit's own sandbox would have blocked the OBD guard, even once installed.**
+  `RestrictAddressFamilies=` lacked `AF_BLUETOOTH`, which the guard's `rfcomm` subprocess needs to
+  open `socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM)` — measured with `strace` on the node.
+  Without it the guard read "not bound" permanently and the collector sat in `obd-blocked` forever
+  while systemd reported `active (running)`. Found before the unit was installed (§11.2).
+- **A cold boot could lose a whole drive.** `_cmd_collect` exited 1 when `bonded_detector_address()`
+  failed, which under `Restart=always` burns the unit's five-per-hour start limit in about two
+  minutes and leaves it dead for the rest of the hour. A continuous collector now waits with
+  backoff; a bounded trial still fails fast.
+- **The reconnect backoff could cost the first five minutes of a drive.** The ceiling was 300 s, so
+  a Pi left powered overnight reached it and then made the engine-on reconnect wait. Now 60 s.
+- **The first real alert could have been silently discarded.** The slot gate rejected a whole
+  detection when the band string, the direction code or the raw signal did not match values taken
+  from a *different product* — and the raw signal's scale is documented here as unknown. The gate is
+  now structural (active marker, field count, strength 1–8); an unfamiliar band, direction or signal
+  marks that one value unknown and publishes the detection. `state.json` saying "clear" while the
+  detector's screen shows Ka is the one output this parser must never produce.
+- **The direction code was not case-normalised** although the band was, so a lowercase direction
+  would have thrown away the detection.
+- **A rejected slot left only a counter.** It now keeps its sanitised text, or a printable shape
+  description when the text cannot be sanitised — the packet that would explain why the parser is
+  wrong is no longer the one packet the parser discards.
+- **`_safe_word` threw away an active POI warning's text.** `SPEEDCAM,500,35` failed the
+  alphanumeric check wholesale and came back `raw: null`; `collect` keeps no raw packets, so it was
+  gone. `_safe_group()` applies the same rules per sub-field and rejoins them. The POI group also
+  gained the coordinate tripwire the GPS group already had.
+- **The POI text was then discarded again at the SQLite boundary.** The `telemetry` table stored
+  only a boolean, so a drive past a known camera left nothing to analyse afterwards.
+- **Retention swept only once, at writer start.** A service left running for weeks carried rows past
+  `retain_days` indefinitely. The writer thread now also sweeps every six hours.
+- **The OBD guard could not tell "`rfcomm` could not run" from "nothing is bound."** Both read as
+  `{device} is not bound`, sending an operator to the vehicle's link when the fault was on the host.
+- **`record_boundaries` could step past the end of a blob**, and `evaluate_layouts` then reported the
+  overshoot as a completed walk — on exactly the shape this test produces, a single 10-byte user mark
+  read under a 12-byte layout.
+- **A failed atomic publish leaked a per-PID temporary file**, and `Restart=always` guarantees a new
+  PID each time. The usual cause is a full card, where leaking a file per attempt makes it worse.
+- **`uniden-r8 history` gated its two output paths unequally.** The publication gate only walks keys
+  when handed JSON, so the table branch fell back to a regex and a lone latitude column would have
+  passed. Both branches are now gated on the structured rows, before rendering.
+- `systemd/unidenr8-collector.service`: `Restart=on-failure` → `Restart=always` (continuous mode has
+  no clean self-exit); added `Group=`; added `AF_BLUETOOTH` to `RestrictAddressFamilies=`.
+- A test that only passed on a machine which had never run the tool (`history` resolved the default
+  database against the process working directory).
+
+### Verified on hardware
+
+Parked with the engine running and the RFCOMM link bound and active: telemetry across several
+sessions with **0 unparsed**, voltage 13.4–13.7 V, GPS locked throughout, OBD invariants unchanged,
+and the e-paper display reading the collector's state. With `record_detector_motion` on and
+`telemetry_every_seconds = 1.0`, rows carrying heading, speed and altitude were recorded at 1 Hz.
+The schema 2→3 migration was proved against a copy of the real 728-row database before it was
+allowed near the live one. Details in [`docs/EVIDENCE.md`](docs/EVIDENCE.md) §11.
+
+### Still not verified
+
+No real alert has ever been captured. No validation has happened with the vehicle moving — heading,
+speed and altitude are read but not checked against a reference. The POI/user-mark coordinate
+experiment has never been run, and the POI record layout remains two graded hypotheses, neither
+checked against a populated database on any detector. See
+[`docs/VALIDATION.md`](docs/VALIDATION.md).
 
 ## 2026-09-02
 

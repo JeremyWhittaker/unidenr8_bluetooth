@@ -150,6 +150,19 @@ class PrivateStore:
         """Write *payload* as pretty JSON into the store, ``0600``."""
         return self.write_text(name, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
+    def read_json(self, name: str) -> Any:
+        """Read a document back out of the store.
+
+        The counterpart to :meth:`write_json`, and the only supported way to
+        get a capture back: it resolves *name* through :meth:`path`, so a name
+        carrying ``..`` or an absolute path cannot reach outside the store.
+
+        What comes back may contain device bytes -- that is the whole reason
+        the store is ``0700``.  Everything downstream of this call is
+        responsible for publishing structure rather than content.
+        """
+        return json.loads(self.path(name).read_text(encoding="utf-8"))
+
     # ----------------------------------------------------------- inspection
 
     def audit(self) -> list[tuple[str, int]]:

@@ -19,6 +19,17 @@ MQTT broker and a live web dashboard. It has no write path to the detector at al
 decoding, the collector's session management, OBD-gated startup and teardown, and coexistence with
 an *idle* OBD link over five minutes. The numbers are in [`EVIDENCE.md`](EVIDENCE.md) §§6–8.
 
+**Installed as a service, for the first time.** `scripts/install-service.sh` derives every path --
+user, group, working directory, `ExecStart`, `PYTHONPATH`, the config file and `ReadWritePaths` --
+from the tree and the node's own configuration, refuses to install unless `selftest` passes, and
+verifies itself against the telemetry counter rather than against systemd's opinion of the process.
+It exists because the previous state cost something real: a unit template that no script installed,
+and a runbook that said not to enable it, produced a 2.5-hour drive that captured nothing
+([`EVIDENCE.md`](EVIDENCE.md) §11.1). Installing it also surfaced the session's most important
+finding before a single mile was driven under it -- the unit's own sandbox would have blocked the
+OBD guard's `rfcomm` subprocess and left the collector stuck in `obd-blocked` while systemd reported
+it healthy (§11.2).
+
 **Run against the detector, on the target hardware.** The event path, the full decoder, the schema-2
 document, the SQLite history and the collector were exercised on the Pi with the detector powered and
 the vehicle's RFCOMM link bound: 184 packets across three windows, 0 unparsed, 0 dropped, 0 gaps,
@@ -26,7 +37,7 @@ loop lag peaking at 2.6 ms, and every OBD invariant unchanged. `EVIDENCE.md` §1
 Untested on hardware: the `gpsd` client (no receiver attached), MQTT (no broker), the local feed, and
 the `inspect` command — which reads saved coordinates and needs its own explicit decision.
 
-640 tests pass with no radio, no broker, no `gpsd` and no network. That proves the code does what it
+691 tests pass with no radio, no broker, no `gpsd` and no network. That proves the code does what it
 was written to do. It does not prove the *protocol* is what upstream says it is.
 
 **Not proven, and the honest gap.** No real radar detection has ever been captured from this
@@ -35,6 +46,17 @@ decoded from a protocol documented on an **R8w**, a different product. The only 
 has ever sent is `0&0&0&0`. Likewise the heading and speed are now read from real packets, but from a
 *stationary* vehicle, so their units and their latency are still upstream's reading rather than a
 measurement.
+
+None of that changed with the service build, and it is worth saying plainly because the build looks
+like progress. The three biggest gaps are exactly what they were: **no real alert has ever been
+captured**, **nothing has been validated with the vehicle moving** -- every heading, speed and
+altitude reading so far, including the ones recorded once `record_detector_motion` was switched on,
+is from a parked vehicle -- and **the POI/user-mark coordinate experiment has never been run**.
+
+What did change is that the first real alert is now much more likely to survive contact with the
+parser. The slot gate used to reject a whole detection over a band string, a direction code or a raw
+signal value that did not match an R8w's, which is a bet nobody had tested; it is now structural,
+and an unfamiliar value marks itself unknown instead of erasing the threat.
 
 One claim did get stronger. "The live telemetry carries no latitude or longitude" used to rest
 entirely on upstream's naming of four fields nobody here had looked at — and a 4-tuple is exactly the
@@ -77,12 +99,27 @@ writing, before touching code.
 
 ## Things that will surprise you
 
-**The detector sends no latitude or longitude.** It knows where it is, but the live BLE telemetry
-carries only an eight-point heading, a speed, an altitude and a status letter. Coordinates come from
-`gpsd` and live in a separate `vehicle_gnss` branch that is never merged with `detector_gps`. There
-is a tripwire in `_parse_gps_group` that fires if the first two GPS sub-fields ever look like a
-coordinate pair — if it fires, this paragraph is wrong and the documentation needs correcting, not
-the tripwire.
+**The live telemetry carries no latitude or longitude — which is narrower than "the detector has no
+position."** The four-field GPS sub-group is exactly the width a coordinate pair would need; it has
+been read on this R8, and the first field is a compass point. There is a tripwire in
+`_parse_gps_group`, and the same mechanism now in `_parse_poi_group`, that fires if two adjacent
+sub-fields ever both look like decimal degrees — if it fires, this paragraph is wrong and the
+documentation needs correcting, not the tripwire.
+
+What that measurement does **not** cover: the detector plainly knows where it is, it can save a user
+mark from its own fix at a button press, and that record sits in the POI characteristic — readable,
+and never yet read populated on any detector. See [`README.md`](../README.md), "The coordinate
+question", and `VALIDATION.md` V8. Continuous coordinates still come from `gpsd`, in a separate
+`vehicle_gnss` branch that is never merged with `detector_gps`.
+
+**Removing `AF_BLUETOOTH` from the unit's `RestrictAddressFamilies=` looks like hardening and is
+actually a silent kill switch.** The BLE link runs over D-Bus (`AF_UNIX`); nothing about talking to
+the detector needs `AF_BLUETOOTH`. But the OBD guard shells out to `rfcomm`, which opens
+`socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM)` — measured with `strace` on the node, not assumed.
+Take it out to "tighten" the sandbox and the guard fails silently, the collector reads "nothing is
+bound" and sits in `obd-blocked` forever, and `systemctl status` says `active (running)` throughout.
+It is exactly the line a future pass over the unit would simplify away, because nothing about the
+detector's own traffic explains why it is there.
 
 **Track identity is a guess, and it is labelled as one.** The alert id field reads `00` in every
 capture anyone has published, so the project correlates on band family, frequency within a
@@ -137,7 +174,8 @@ src/uniden_r8/
   discovery.py    bounded advertisement-only scanning
   pairing.py      the one guarded bluetoothctl call
   identity.py     Device Information reads
-  inspection.py   the confirmed settings/POI dump
+  inspection.py   the confirmed settings/POI dump, and the layout adjudicator
+  poi_diff.py     offline comparison of two POI captures; prints no coordinate
   collector.py    the long-running process that wires it together
   cli.py          the command surface
 ```
@@ -146,19 +184,26 @@ src/uniden_r8/
 
 Roughly in order of value, assuming the detector can be powered on:
 
-1. **Run the validation matrix.** Nothing else in this list is worth as much as promoting the alert
+1. **Capture a real alert.** Nothing else in this list is worth as much as promoting the alert
    fields from UPSTREAM to OBSERVED. Start with the K-band test — an automatic-door opener is a
-   lawful passive source and takes ten minutes.
-2. **Prove OBD coexistence under load.** The existing evidence is a parked five-minute trial with
-   the OBD collector *idle*. A one-to-two-hour drive with active polling is the test that would
-   justify enabling the service at boot. Watch `health.telemetry_interval` while you do it.
-3. **Read the settings blocks and build a map, one physical toggle at a time.** `uniden-r8 inspect
+   lawful passive source and takes ten minutes. The parser is now much likelier to survive an
+   unfamiliar packet than it was, but "likelier" is not evidence.
+2. **Drive it.** Every heading, speed and altitude reading collected so far is from a parked
+   vehicle. V1 in [`VALIDATION.md`](VALIDATION.md) needs the vehicle moving against a reference
+   GNSS before those fields promote past "read, not validated". Use the "validation drive" profile
+   in [`CONFIGURATION.md`](CONFIGURATION.md) — the defaults record none of those three columns.
+3. **Run the POI/user-mark experiment (V8).** Stop the collector, park with a fix, short-press the
+   physical MARK button once — a held press is delete-all — and diff the POI characteristic with
+   `uniden-r8 poi-diff`. `inspection.evaluate_layouts()` says which of the two graded record-length
+   hypotheses the result matches, or neither. It needs no write path and sends no command. That is
+   a *framing* question, not a coordinate: there is still deliberately no POI parser, and adding one
+   is a separate decision from settling the framing.
+4. **Prove OBD coexistence under load.** The existing evidence is parked, with the OBD collector
+   *idle*. A one-to-two-hour drive with active polling is the stronger test. Watch
+   `health.telemetry_interval` while you do it.
+5. **Read the settings blocks and build a map, one physical toggle at a time.** `uniden-r8 inspect
    --confirm` produces the snapshot; the procedure is in [`VALIDATION.md`](VALIDATION.md). This is
    slow, safe, and the only honest way to get a settings map for *this* firmware.
-4. **Decode the POI record layout** — but only after a controlled test where a single known user
-   mark is created and removed. There is deliberately no POI parser in the codebase: a parser that
-   can appear to succeed on a structure nobody has seen populated would manufacture coordinates that
-   somebody would believe.
 
 And one thing that is deliberately **not** on this list: adding a write path. Upstream's own write
 commands were decompiled from an app and have never been sent to hardware on any model, the target

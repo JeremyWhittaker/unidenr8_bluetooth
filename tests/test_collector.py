@@ -11,11 +11,12 @@ import asyncio
 import json
 import math
 import os
+import time
 
 import pytest
 
 from fixtures import RANDOM_STATIC
-from uniden_r8 import collector, gatt
+from uniden_r8 import collector, gatt, gnss, storage
 from uniden_r8.evidence import DIR_MODE, FILE_MODE
 from uniden_r8.privacy import looks_like_identifier
 
@@ -648,6 +649,109 @@ def test_the_detailed_document_carries_no_position_without_a_gnss_source(tmp_pat
     detail = _detail(tmp_path)
     assert detail["vehicle_gnss"] is None
     assert not looks_like_position(detail)
+
+
+class _StubGnssClient:
+    """A GNSS client with an immediate fix.  No `gpsd`, no network.
+
+    Mirrors only what `Sinks` actually touches on a real `GnssClient`: a
+    `fix` property, a `status()` for the sink-status document, and a `run()`
+    that occupies its task until told to stop -- exactly the seam
+    `Sinks.start()` reaches for via `uniden_r8.gnss.GnssClient`.
+    """
+
+    def __init__(self, *_args, **_kwargs):
+        self._fix = gnss.Fix(
+            mode=3, lat=33.4484, lon=-112.0740, altitude_m=331.0,
+            speed_mps=12.5, track_deg=88.0, epx_m=3.0, epy_m=3.0,
+            satellites=8, monotonic_ns=time.monotonic_ns(), wall_ns=time.time_ns(),
+        )
+
+    @property
+    def fix(self):
+        return self._fix
+
+    def status(self):
+        return {"enabled": True, "connected": True}
+
+    async def run(self, stop):
+        await stop.wait()
+
+
+def _gnss_fix_count(history_path) -> int:
+    with storage.History(history_path, read_only=True) as history:
+        cursor = history.connection.execute("SELECT count(*) FROM gnss_fixes")
+        return cursor.fetchone()[0]
+
+
+def test_the_collector_fills_gnss_fixes_end_to_end_through_the_history_writer(
+    tmp_path, monkeypatch,
+):
+    """`HistoryWriter.record_fix` is reachable, not merely present in the source.
+
+    An audit found `_record_history_fix` wired up in `collector.py` but no
+    test proving the `gnss_fixes` table actually filled end to end, so the
+    claim "it is never called" could not be refuted from the suite alone.
+    This runs the real collector loop with history and GNSS both enabled,
+    against a stub GNSS client, and reads the row back out of the database
+    the collector itself wrote.
+    """
+    from uniden_r8 import config as config_module
+
+    monkeypatch.setattr(gnss, "GnssClient", _StubGnssClient)
+    state_dir = tmp_path / "state"
+    settings = config_module.Config(
+        obd=config_module.ObdConfig(guard=False),
+        history=config_module.HistoryConfig(enabled=True),
+        gnss=config_module.GnssConfig(enabled=True),
+        # `Config.history_path` resolves against `collector.state_dir`, not
+        # against whatever path `collector.run` is given directly -- so the
+        # two must be the same directory or the database this test reads
+        # would not be the one the collector wrote.
+        collector=config_module.CollectorConfig(state_dir=str(state_dir)),
+    )
+    client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY)])
+    asyncio.run(
+        collector.run(
+            RANDOM_STATIC, state_dir, duration=0.2,
+            obd_probe=lambda: HEALTHY, client_factory=lambda a: client,
+            install_signal_handlers=False, config=settings,
+        )
+    )
+
+    assert _gnss_fix_count(settings.history_path) > 0
+
+
+def test_gnss_fixes_stays_empty_when_gnss_is_disabled(tmp_path, monkeypatch):
+    """The control the claim above needs: same run, minus the enabled flag.
+
+    Without this half, a passing "count is greater than zero" test alone
+    could not distinguish "the collector wires GNSS fixes into history" from
+    "this table always gets a row from somewhere else regardless of
+    configuration" -- the same reasoning the audit used to say the positive
+    case alone was not enough evidence.
+    """
+    from uniden_r8 import config as config_module
+
+    monkeypatch.setattr(gnss, "GnssClient", _StubGnssClient)
+    state_dir = tmp_path / "state"
+    settings = config_module.Config(
+        obd=config_module.ObdConfig(guard=False),
+        history=config_module.HistoryConfig(enabled=True),
+        gnss=config_module.GnssConfig(enabled=False),
+        collector=config_module.CollectorConfig(state_dir=str(state_dir)),
+    )
+    client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY)])
+    asyncio.run(
+        collector.run(
+            RANDOM_STATIC, state_dir, duration=0.2,
+            obd_probe=lambda: HEALTHY, client_factory=lambda a: client,
+            install_signal_handlers=False, config=settings,
+        )
+    )
+
+    assert _gnss_fix_count(settings.history_path) == 0
+
 
 
 # ----------------------------------------------------------- lossless events

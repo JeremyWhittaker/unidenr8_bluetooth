@@ -327,6 +327,48 @@ def _safe_word(value: str | None, *, limit: int = 16) -> str | None:
     return candidate
 
 
+def _safe_group(value: str | None, *, limit: int = 48, max_parts: int = 8) -> str | None:
+    """Sanitise a comma-separated group without destroying its structure.
+
+    :func:`_safe_word` is the right check for one field and the wrong one for a
+    group.  A comma is not alphanumeric, so a whole group fails the check and
+    the content is thrown away -- which is how an active POI warning reading
+    ``SPEEDCAM,500,35`` became ``active=True, raw=None`` and left nothing behind
+    but a boolean.  The `collect` path keeps no raw packets, so that loss was
+    permanent, and the first real camera warning would have been unreadable.
+
+    This applies exactly the same rules per sub-field and rejoins them, so the
+    injection properties are unchanged: one bounded overall length, a bounded
+    part count, every part still alphanumeric after spaces, dots and hyphens are
+    stripped, and no separator other than the one the wire format already uses.
+    One bad sub-field still refuses the whole group rather than emitting a
+    partial one -- a half-sanitised value is worse than none, because it looks
+    trustworthy.
+    """
+    if value is None:
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > limit:
+        return None
+    pieces = candidate.split(",")
+    if len(pieces) > max_parts:
+        return None
+    cleaned: list[str] = []
+    for piece in pieces:
+        stripped = piece.strip()
+        if not stripped:
+            # An empty sub-field is a shape fact, not a violation: the wire
+            # format uses position, so dropping the group would lose the
+            # positions of everything after it.
+            cleaned.append("")
+            continue
+        safe = _safe_word(stripped, limit=limit)
+        if safe is None:
+            return None
+        cleaned.append(safe)
+    return ",".join(cleaned)
+
+
 # --------------------------------------------------------------------------
 # --------------------------------------------------------------------------
 # Telemetry
@@ -434,11 +476,15 @@ class PoiWarning:
 
     active: bool = False
     raw: str | None = None
+    #: The coordinate tripwire fired on this group: two adjacent sub-fields both
+    #: parsed as signed decimal degrees.  ``raw`` is withheld when this is true.
+    suspect_pair: bool = False
 
     def detailed(self) -> dict[str, Any]:
         return {
             "active": self.active,
             "raw": self.raw,
+            "suspect_pair": self.suspect_pair,
             "decoded": None,  # see the class docstring: no evidence, no parser
         }
 
@@ -601,10 +647,27 @@ def _parse_gps_group(raw: str | None) -> DetectorGps:
 
 
 def _parse_poi_group(raw: str | None) -> PoiWarning:
-    """Decode field 1.  Only the inactive form has ever been observed."""
+    """Decode field 1.  Only the inactive form has ever been observed.
+
+    The group is retained as sanitised text, not parsed.  Upstream reads it as
+    type, distance and speed limit; nobody has seen it populated on any
+    detector, so a structure nobody has seen does not get a parser that can
+    appear to succeed.  What it does get is the same coordinate tripwire the
+    GPS group has, for a stronger reason: POI is the characteristic that holds
+    saved camera locations and user marks, and if a warning ever carries the
+    position of the thing being warned about, that is the most sensitive text
+    the detector sends.  If the tripwire fires, ``raw`` is dropped and the
+    boolean survives -- and the documentation is what needs correcting.
+    """
     if not raw or raw == "0":
         return PoiWarning(active=False)
-    return PoiWarning(active=True, raw=_safe_word(raw, limit=48))
+    parts = [piece.strip() for piece in raw.split(",")]
+    if any(
+        _looks_like_coordinate(left) and _looks_like_coordinate(right)
+        for left, right in zip(parts, parts[1:], strict=False)
+    ):
+        return PoiWarning(active=True, raw=None, suspect_pair=True)
+    return PoiWarning(active=True, raw=_safe_group(raw, limit=48))
 
 
 def parse_telemetry(payload: bytes | bytearray | str) -> Telemetry:
@@ -703,6 +766,15 @@ class Alert:
     slot: int = 0
     #: How many comma-separated fields the slot actually had.
     field_count: int = 0
+    #: Whether :attr:`band` is one of the strings upstream documented.  A band
+    #: this project has never seen is still published -- with this false -- but
+    #: field 5 is left uninterpreted, because the frequency-versus-gun-id split
+    #: is keyed on the band and an unknown band decides neither.
+    band_recognised: bool = True
+    #: Field 6 exactly as sent, kept whether or not it matched a known code.
+    #: The direction vocabulary comes from an R8w; if this detector uses a
+    #: different one, this is the field that will show it.
+    direction_raw: str | None = None
 
     @property
     def direction_name(self) -> str:
@@ -730,10 +802,28 @@ class Alert:
             return None
         return LASER_GUNS[self.laser_gun_id]
 
+    @property
+    def band_name(self) -> str:
+        """The band for public output: an allowlisted name, or ``"unknown"``.
+
+        The two rules that meet here used to be in conflict, and the conflict
+        was resolved the wrong way.  An unfamiliar band must not discard the
+        detection -- publishing "clear" during a real threat is the worst thing
+        this parser can do -- but an arbitrary string from a device must not be
+        reflected into output that a person or another program reads.
+
+        Both hold if the *detection* is published and the *string* is not.  So
+        the public view says `unknown`, and the sanitised text survives in
+        :meth:`detailed`, which goes only to the owner-only schema-2 document,
+        the local history and `live --full`.  Nothing is lost and nothing
+        unfamiliar is echoed.
+        """
+        return self.band if self.band_recognised else "unknown"
+
     def publishable(self) -> dict[str, Any]:
         """The conservative view.  Unchanged since schema 1."""
         return {
-            "band": self.band,
+            "band": self.band_name,
             "strength": self.strength,
             "frequency_ghz": self.frequency_ghz,
             "direction": self.direction_name,
@@ -751,8 +841,10 @@ class Alert:
             "laser_gun_id": self.laser_gun_id,
             "laser_gun": self.laser_gun,
             "field_5_raw": self.field_5_raw,
+            "band_recognised": self.band_recognised,
             "direction": self.direction_name,
             "direction_code": self.direction,
+            "direction_raw": self.direction_raw,
             "mute_code": self.mute_code,
             "mute_state": self.mute_status,
             "muted": self.muted,
@@ -769,7 +861,8 @@ class Alert:
         bars = "#" * (self.strength or 0)
         muted = "  [muted]" if self.muted is True else ""
         return (
-            f"{self.band:<6} {frequency:<10} {bars:<8} {self.direction_name}{muted}"
+            f"{self.band_name:<6} {frequency:<10} {bars:<8} "
+            f"{self.direction_name}{muted}"
         )
 
 
@@ -780,11 +873,21 @@ class Slot:
     index: int
     state: str
     alert: Alert | None = None
+    #: The slot's own text, sanitised, kept only when it could not be decoded.
+    #:
+    #: A rejected slot used to leave nothing but a counter.  That is the worst
+    #: possible outcome for a detector that has never produced an active alert:
+    #: the one packet that would have told us why the parser is wrong is the one
+    #: packet the parser throws away.  A readable slot does not need this --
+    #: every field of it is already published -- so this is only ever set for
+    #: the failures, which is exactly where the information would otherwise go.
+    raw: str | None = None
 
     def detailed(self) -> dict[str, Any]:
         return {
             "index": self.index,
             "state": self.state,
+            "raw": self.raw,
             "alert": self.alert.detailed() if self.alert else None,
         }
 
@@ -854,33 +957,74 @@ class AlertSnapshot:
 def _parse_slot(segment: str, slot: int) -> Alert | None:
     """Decode one comma-separated slot, or return ``None`` if it is not sane.
 
-    Strict about the fields whose meaning is established and whose value every
-    consumer keys on -- the active marker, the band, the strength range, the
-    direction -- and lenient about everything else.  An unlisted mute code, an
-    absent frequency or an unknown receive mode leaves that value unknown; it
-    does not throw away the detection.
+    Strict about *structure* -- the active marker, the field count, and the one
+    numeric field with an established range -- and lenient about every
+    vocabulary, because every vocabulary here came from a different product.
+    An unlisted mute code, an unknown band, an unfamiliar direction code, an
+    absent frequency or an unreadable raw signal leaves that one value marked
+    unknown; none of them throws away the detection.
     """
     fields = segment.split(",")
-    band = (_at(fields, 2) or "").upper()
+    # Both are case- and whitespace-normalised.  The band always was; the
+    # direction was not, so a detector that sent `f` instead of `F` had its
+    # entire detection thrown away by the gate below.  Every direction code on
+    # file comes from an R8w, and this detector has never produced an active
+    # alert, so an assumption about its letter case was an assumption that
+    # could only be tested by losing the first real one.
+    band = (_at(fields, 2) or "").strip().upper()
     strength = _int(_at(fields, 3))
     signal = _int(_at(fields, 4))
-    direction = _at(fields, 6)
+    direction_raw = (_at(fields, 6) or "").strip().upper()
 
+    # The hard gate is *structural* plus the one numeric field with an
+    # established range.  A slot that starts with the active marker, carries at
+    # least eight fields and reports a strength of 1-8 is a detection, and the
+    # right response to an unfamiliar value elsewhere in it is to publish the
+    # detection with that value marked unknown.
+    #
+    # This used to also require the band to be a known string, the direction to
+    # be a known code, and the raw signal to parse as an integer.  Every one of
+    # those vocabularies came from a *different product*, and the raw signal's
+    # scale is documented here as unknown.  So on a detector that has never
+    # produced an active alert, any small difference from the R8w would have
+    # rejected the slot, set `recognised` false, and published "clear" while the
+    # detector's own screen showed a Ka threat.  Silence is the one output this
+    # parser must never produce from a real detection.
     if (
         len(fields) < 8
         or _at(fields, 0) != "1"
-        or band not in BANDS
         or strength is None
         or not 1 <= strength <= 8
-        or signal is None
-        or direction not in DIRECTIONS
     ):
         return None
+
+    # An unknown band is still published, but only if it sanitises: an arbitrary
+    # device string must not reach a document, and one that fails `_safe_word`
+    # is not a band by any reading.
+    #
+    # The limit is deliberately loose.  The longest band on file is `KA POP`, at
+    # six characters, and a tighter bound would rediscover the bug this whole
+    # branch exists to fix -- rejecting a real detection because its band name
+    # was unfamiliar, this time by being unfamiliar *and long*.  The injection
+    # protection here is the alphanumeric check, not the length; the length is
+    # only there so the string is bounded at all.
+    band_recognised = band in BANDS
+    if not band_recognised:
+        safe_band = _safe_word(band, limit=16)
+        if safe_band is None:
+            return None
+        band = safe_band
+
+    direction = direction_raw if direction_raw in DIRECTIONS else None
 
     info = _at(fields, 5)
     frequency: float | None = None
     gun_id: int | None = None
-    if band in _GUN_ID_BANDS:
+    if not band_recognised:
+        # Field 5 is a tagged union keyed on the band.  An unknown band selects
+        # no branch, so neither reading is applied and only the raw survives.
+        pass
+    elif band in _GUN_ID_BANDS:
         gun_id = _int(info)
     elif band not in _NO_FREQUENCY_BANDS:
         frequency = _float(info)
@@ -896,6 +1040,8 @@ def _parse_slot(segment: str, slot: int) -> Alert | None:
         laser_gun_id=gun_id,
         field_5_raw=_safe_word(info, limit=12),
         direction=direction,
+        direction_raw=_safe_word(direction_raw, limit=4),
+        band_recognised=band_recognised,
         # Validated as a short token even though its *value* is no longer
         # required to be a known code.  An unlisted mute code must not throw
         # away a real Ka detection -- but it must not put an arbitrary device
@@ -908,6 +1054,37 @@ def _parse_slot(segment: str, slot: int) -> Alert | None:
         field_count=len(fields),
         parsed=True,
     )
+
+
+def _describe_unreadable(segment: str) -> str | None:
+    """Say what an unreadable slot contained, without reflecting it.
+
+    The sanitised text when it sanitises, and a *shape* when it does not.  A
+    slot that fails :func:`_safe_group` is exactly the one worth knowing about
+    -- it holds a character no field of this protocol should carry -- and
+    returning ``None`` there would throw away the only clue at the only moment
+    it matters.  So the fallback names the field count and the offending
+    character classes and prints nothing the device sent.
+
+    The bytes themselves are not lost either way: `collect` stores every alert
+    payload verbatim in the owner-only history, and `live` writes them to the
+    private capture.  This is what may be *read on a screen*.
+    """
+    safe = _safe_group(segment, limit=80, max_parts=12)
+    if safe is not None:
+        return safe
+    parts = segment.split(",")
+    classes = []
+    if any(character.isspace() for character in segment):
+        classes.append("whitespace")
+    if any(not character.isprintable() for character in segment):
+        classes.append("control")
+    if any(character in "<>&\"'{}\\" for character in segment):
+        classes.append("markup")
+    if len(segment) > 80:
+        classes.append("over-length")
+    detail = ", ".join(classes) if classes else "unexpected characters"
+    return f"<{len(parts)} fields, not printable: {detail}>"
 
 
 def parse_alert_snapshot(payload: bytes | bytearray | str) -> AlertSnapshot:
@@ -924,7 +1101,9 @@ def parse_alert_snapshot(payload: bytes | bytearray | str) -> AlertSnapshot:
             continue
         alert = _parse_slot(segment, index)
         if alert is None:
-            snapshot.slots.append(Slot(index, SLOT_UNREADABLE))
+            snapshot.slots.append(
+                Slot(index, SLOT_UNREADABLE, raw=_describe_unreadable(segment))
+            )
             snapshot.recognised = False
             snapshot.rejected_slots += 1
             continue

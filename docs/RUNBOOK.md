@@ -407,7 +407,9 @@ typed fields below.
 
 **`obd-blocked` is not an error in this project.** It means the OBDLink was
 unhealthy and the collector let go of the detector on purpose. Investigate the
-OBD side, not this one.
+OBD side, not this one — but read `obd.reason` before you do: the value
+`"rfcomm could not be run"` points at this host rather than at the vehicle. See
+Troubleshooting.
 
 **`stale: true`** means telemetry stopped arriving more than 10 s ago. A frozen
 reading is worse than a blank one, so the display line says `STALE`.
@@ -588,25 +590,73 @@ are unchanged.
 
 ### Installing it as a service
 
-**Not done here, and it needs `sudo`.** After a trial has been watched through
-a real drive:
-
 ```bash
-sudo install -m 0644 systemd/unidenr8-collector.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl start unidenr8-collector      # start and watch; do not enable yet
-systemctl status unidenr8-collector
+./scripts/install-service.sh                 # install, enable at boot, start
+./scripts/install-service.sh --dry-run       # print the rendered unit, change nothing
+./scripts/install-service.sh --no-enable     # install and start, but not at boot
+./scripts/uninstall-service.sh               # stop and remove it
 ```
 
-The unit has an `[Install]` section so Jeremy can later enable it explicitly,
-but nothing in this project does so. First observe a drive with active OBD
-polling. Only after that stronger coexistence check, enable boot startup with
-`sudo systemctl enable unidenr8-collector.service`. It orders itself after
-`hummer-rfcomm` but does not `Want` or `Require` it — see `docs/SAFETY.md`.
+**This section used to say the opposite,** and the reversal is deliberate. It
+said installation was "not done here", required hand-editing four paths in the
+unit, and told Jeremy not to enable it until a drive with active OBD polling
+had been observed. That advice cost a real drive: the truck ran roughly
+17:00–19:30 and captured nothing, because no script installed the unit and the
+runbook said not to enable it. The newest row in the history database was from
+15:31, before departure (`docs/EVIDENCE.md` §11.1).
 
-The display code is deployed separately and its existing service must be
-restarted once to load it: `sudo systemctl restart hummer-display.service`.
-Neither command restarts or edits `hummer-rfcomm.service`.
+It was also self-defeating on its own terms. The observation it was waiting for
+— a drive with the collector running — cannot happen while the collector is
+never started. The caution is withdrawn; the safety properties behind it are
+not.
+
+`scripts/install-service.sh` replaces the four hand-edited paths, not the care.
+It:
+
+* templates `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=`, `PYTHONPATH`,
+  `UNIDEN_R8_CONFIG` and `ReadWritePaths=` from the tree it is run out of and
+  the node's own `unidenr8.toml`, and then *checks* that each substitution
+  landed. A hand-edited path that is subtly wrong produces a unit that starts,
+  reports `active (running)`, and does nothing useful;
+* **refuses to install unless `uniden-r8 selftest` passes** — the read-only
+  property audit is the one control that has to hold before anything else
+  matters;
+* warns, without refusing, if `[history] enabled` is off (the service will run,
+  publish state, and record nothing to SQLite — which you find out afterwards,
+  the one time it cannot be fixed) or if `[obd] guard` names a unit this host
+  does not have (the collector will sit in `obd-blocked` forever, correctly,
+  and nobody should have to read that out of a state file to learn it);
+* is idempotent. Re-running after a `git pull` and a redeploy is the supported
+  upgrade path;
+* **verifies against the telemetry counter, not against systemd.**
+  `active (running)` only means the process has not exited. The script samples
+  `state.json`'s `counters.telemetry_packets` and reports whether it moved.
+
+**What did not change.** It needs `sudo` for exactly three things — writing one
+unit file, `daemon-reload`, and starting one unit — and it touches no other
+unit. It never restarts, edits, enables or disables `hummer-rfcomm`,
+`bluetooth`, or the display service: the vehicle's OBD-II link is somebody
+else's, and a script that can restart it is a script that can break a drive.
+The unit still orders itself after `hummer-rfcomm` without `Want`-ing or
+`Require`-ing it — see `docs/SAFETY.md` — because the collector's own read-only
+OBD guard is the real protection, not a dependency edge.
+
+Two changes to the unit itself are worth knowing even though the script handles
+them. `Restart=on-failure` became `Restart=always`, because in continuous mode
+the collector has no clean self-exit: it loops over connect, stream and backoff
+until it is signalled, so an exit of any kind means something went wrong while
+the vehicle was unattended. And `RestrictAddressFamilies=` gained
+`AF_BLUETOOTH`, which is the most important line in this document — see
+Troubleshooting below.
+
+The display code is deployed separately and its service must still be restarted
+once to pick up state from a newly installed collector:
+`sudo systemctl restart hummer-display.service`. The installer does not do this
+for you; it manages exactly one unit.
+
+`scripts/uninstall-service.sh` stops and removes that unit only. The tree, the
+venv, the configuration, the state directory and the history database are left
+alone — it stops a service, it does not delete anybody's data.
 
 ## Step 7 — stop
 
@@ -648,13 +698,41 @@ executed by any agent:
 |---|---|---|
 | `rfkill list bluetooth` shows soft-blocked | `sudo rfkill unblock bluetooth` | Not currently blocked on this node — `hci0` is `UP RUNNING`. |
 | `bluetoothctl pair` fails `AccessDenied` or "Rejected send message" | `sudo usermod -aG bluetooth $USER`, then log out and back in | Only if a `bluetooth` group exists and gates pairing. This node has no such group, and scanning works without it. |
-| Install/start the reviewed collector and load the display reader | `sudo install -m 0644 /home/jeremy/unidenr8/systemd/unidenr8-collector.service /etc/systemd/system/unidenr8-collector.service && sudo systemctl daemon-reload && sudo systemctl start unidenr8-collector.service && sudo systemctl restart hummer-display.service` | Starts only the new R8 service and restarts only the display; it does not touch `hummer-rfcomm`. Do not enable at boot until an active-polling drive is observed. |
+| Install, upgrade or start the service | `./scripts/install-service.sh` (`--dry-run` to preview, `--no-enable` to skip boot) | Templates every path from the tree and the node's own config, refuses to run unless `selftest` passes, and verifies against the telemetry counter rather than systemd's opinion. Touches exactly one unit; never restarts, edits, enables or disables `hummer-rfcomm`, `bluetooth` or the display service. |
+| Load display changes after installing or upgrading | `sudo systemctl restart hummer-display.service` | Restarts only the display; does not touch `hummer-rfcomm`. |
+| Remove the service | `./scripts/uninstall-service.sh` | Stops and deletes the one unit; leaves the tree, venv, configuration, state directory and history database in place. |
 
 Neither is needed today.
 
 ---
 
 ## Troubleshooting
+
+**`obd-blocked` forever, while `systemctl status` says `active (running)`.**
+Read `obd.reason` in `state.json` before touching the vehicle's link. Two
+strings mean two entirely different faults:
+
+* `"rfcomm could not be run"` — the guard's `rfcomm` subprocess failed to
+  execute. On this unit that almost always means the installed unit's
+  `RestrictAddressFamilies=` is missing `AF_BLUETOOTH`: `rfcomm` opens
+  `socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM)` to read what is bound
+  (measured with `strace` on the node, `docs/EVIDENCE.md` §11.2), and without
+  that address family the call fails, `rfcomm` lists nothing, and the guard
+  reads "not bound" permanently. **Fix the host, not the vehicle.** Confirm
+  `AF_BLUETOOTH` is in the installed unit and re-run
+  `./scripts/install-service.sh`. Do not remove that address family to "tighten"
+  the sandbox — it protects nothing and only breaks the guard.
+* `"/dev/rfcomm0 is not bound"` — `rfcomm` ran and reported nothing bound. This
+  one really is the vehicle's side: check `systemctl is-active hummer-rfcomm`.
+
+A service that is healthy by every signal systemd offers and captures nothing is
+the worst available failure, because nobody goes looking for it.
+
+**A drive recorded rows but no heading, speed or altitude.** Those three columns
+are written only when `[history] record_detector_motion` is on, and it defaults
+to off. See "A validation drive" in `docs/CONFIGURATION.md`. The default is
+right for privacy and wrong for the one drive whose purpose is to validate those
+fields.
 
 **Empty scan.** Almost always the detector: not armed, window expired, phone
 holding the link, or no Bluetooth firmware. Work through step 4's arming notes

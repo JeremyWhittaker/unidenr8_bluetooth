@@ -594,30 +594,52 @@ the code:
 * Ideally several consecutive packets showing the distance sub-field counting
   down on the approach. That is what turns a structure into a decoded field.
 
-**Expect `raw` to be null.** `_parse_poi_group` passes the group through
-`_safe_word(limit=48)`, which rejects any string containing a comma. Upstream's
-active form is comma-separated, so the sanitized record will be
-`{"active": true, "raw": null, "decoded": null}` — the boolean survives and the
-text does not. That is the sanitizer working as designed; it is also why this
-test cannot be run under the collector, whose only record would be
-`poi_warning: true`.
+**`raw` now carries the text.** It used to come back null: `_parse_poi_group`
+passed the whole group through `_safe_word(limit=48)`, which rejects any string
+containing a comma, and upstream's active form is comma-separated. So a real
+warning reading `SPEEDCAM,500,35` was recorded as
+`{"active": true, "raw": null}` — the boolean survived and the content did not,
+permanently, because `collect` keeps no raw packets. It now sanitises with
+`_safe_group()`, which applies the same character rules per sub-field and
+rejoins them, so the structure survives and this test **can** be run under the
+collector as well as under `live`.
+
+Read it from `live --json --full`, or from `detector.poi` in the collector's
+`state-v2.json`, or afterwards from the history's `telemetry.poi_raw` column —
+that last one only when `[history] record_detector_motion` is on, which is the
+same opt-in the heading and speed live behind and for the same reason.
+
+**One case still returns null, by design.** `_parse_poi_group` carries the same
+coordinate tripwire the GPS group has: if two adjacent sub-fields both look like
+decimal degrees, `raw` is withheld and `poi.suspect_pair` is set true instead.
+POI is the characteristic that holds saved locations, so if a warning ever
+carries the position of the thing being warned about, that is the most sensitive
+text the detector sends. Treat a fired tripwire as its own result — it means the
+documentation needs correcting — not as the sanitiser failing.
 
 **Promotes.** `poi.active` from "observed inactive" to "observed active", and,
-if the private hex shows a stable three-part structure across several packets,
-gives the first real evidence for the POI type, distance and speed-limit
-sub-fields — currently all `candidate`.
+if `poi.raw` shows a stable three-part structure across several packets, gives
+the first real evidence for the POI type, distance and speed-limit sub-fields —
+currently all `candidate`.
 
 ---
 
 ### V8 — A stored-POI dump, before and after creating one user mark
 
-**What it proves.** The POI database's record framing: the type byte, the record
-length, and whether upstream's candidate lengths (speed camera 15, red-light 14,
-user mark 12 bytes — the values in `CANDIDATE_RECORD_LENGTHS`, which is what the
-boundary walk actually uses; the module docstring above it says 13, 12 and 10,
-and the two disagree) hold on this unit. Upstream published those lengths and also
-recorded that the only POI database it ever read was **empty**, so this may be
-the first non-empty POI read on any unit.
+**What it proves.** The POI database's record framing — which of the two graded
+layouts in `inspection.CANDIDATE_LAYOUTS` this unit actually uses. Upstream
+published the numbers 13, 12 and 10; this project used to read them as *payload*
+sizes and derive whole records of 15, 14 and 12. Both readings are now held,
+separately graded (`whole-record`, UPSTREAM-UNVERIFIED; `payload-plus-header`,
+INFERENCE — `docs/EVIDENCE.md` §11.7), and `inspection.evaluate_layouts()` runs
+both against a capture and reports which one, if either, consumes the blob
+**exactly**. Upstream also recorded that the only POI database it ever read was
+**empty**, so this may be the first non-empty POI read on any unit.
+
+**It needs no write path and sends no command.** The new record is created by a
+physical button on the detector. Everything this project does is read the
+characteristic twice and compare — which is why this experiment is available at
+all under a project that has no way to write to the detector.
 
 **This is the most sensitive test in the document.** The POI characteristic is
 the only attribute that carries real coordinates — saved cameras, and every user
@@ -627,16 +649,54 @@ mark Jeremy has ever made. `inspect` exists for exactly this, it requires
 **Procedure.** Parked. Somewhere unremarkable: create the test mark in a car
 park, not on the driveway, because its bytes are about to be examined.
 
-1. `inspect --confirm` → snapshot A.
-2. On the detector, create exactly **one** user mark.
-3. `inspect --confirm` → snapshot B.
-4. Delete the mark on the detector, by hand, if it is not wanted.
+1. Park with a clear sky view and wait for a fix. `state-v2.json`'s
+   `detector.detector_gps.status_raw` reading `C` is what this project has
+   observed while a fix was present. A mark made without a fix is not the test.
+2. Record a trusted reference fix — a phone, or a GNSS receiver — with its
+   timestamp. Write it into a private JSON file as `{"lat": .., "lon": ..}`;
+   do not type it on a command line, where it would enter a shell history.
+3. **Stop the collector** if it is running: `sudo systemctl stop
+   unidenr8-collector`. `inspect` opens its own BLE connection, and only one
+   process may hold the central role for the detector at a time.
+4. `inspect --confirm` → snapshot A.
+5. On the detector, **short-press the physical MARK button once.** Do **not**
+   press and hold: a held press is this detector's delete-all for saved marks,
+   and would erase every mark Jeremy has ever made along with the test one.
+6. `inspect --confirm` → snapshot B.
+7. Delete the test mark on the detector, by hand, if it is not wanted kept.
+8. Restart the collector.
 
 ```bash
+sudo systemctl stop unidenr8-collector
 .venv/bin/uniden-r8 inspect --confirm          # snapshot A
-# ... create one user mark on the detector ...
+# ... short-press MARK once on the detector; do not hold it ...
 .venv/bin/uniden-r8 inspect --confirm          # snapshot B
+sudo systemctl start unidenr8-collector
 ```
+
+Then let the differ adjudicate. It reads two captures already in the private
+store, reports what changed and which layout accounts for it, and — given the
+reference file — how far the decoded point is from your own fix. **It never
+prints a coordinate:**
+
+```bash
+.venv/bin/uniden-r8 poi-diff <snapshot-A> <snapshot-B> \
+    --reference-file /path/to/private/reference.json
+```
+
+Its output looks like this, and the last line is the verdict:
+
+```
+POI capture: 20 bytes -> 30 bytes
+  +10 bytes, appended to the end
+  whole-record (13/12/10): 3 records, consumes the blob exactly
+  payload-plus-header (15/14/12): 1 record, 12/30 bytes
+  new user mark at offset 20 (10 bytes, whole-record): decodes to a legal
+    coordinate, 15 m from the reference fix -- agrees
+```
+
+The raw diff below is still worth running if the differ reports something
+unexpected, because it shows *which* bytes moved:
 
 Then diff the two, on the node:
 
@@ -660,21 +720,34 @@ for uuid, before in first.items():
 PY
 ```
 
-**Pass condition.**
+**Pass condition: the blob grows by exactly one record, and exactly one layout
+consumes it exactly — record which.**
 
-* The POI blob grows by exactly one record.
-* The growth is a whole number of bytes matching one of upstream's candidate
-  lengths, beginning with the corresponding type byte (`0x03` for a user mark).
-  A 12-byte growth led by `0x03` confirms upstream's framing for that type.
-* The printed `inspect` summary's record-boundary walk completes across the
-  whole blob rather than stopping at an unrecognised type byte. `inspect`
-  reports that already: "N candidate record boundaries on upstream's layout",
-  with ", walk did not complete" appended when it stopped early.
+* The POI blob grows by exactly one record, appended at the end.
+* Exactly one of the two layouts reports `exact` from `evaluate_layouts()`. A
+  blob written in one layout desynchronises almost immediately under the other,
+  so on a real record at most one should come back exact. **If both do, or
+  neither does, that is itself the result** — the framing is not what either
+  hypothesis says, and that is worth writing down exactly as much as a clean
+  match would be. Do not force either parser to fit.
+* The new record's type byte reads `0x03` at the offset where the old blob
+  ended.
+* With a reference fix supplied, the decoded point is within tens of metres of
+  it. The float32 encoding is good to well under a metre at usual latitudes, so
+  a miss by kilometres means the layout is wrong, not the fix.
 
-**What may be written down.** The record length, the type byte, whether the walk
-completed, and the byte offsets that changed. **Never** the delta's contents.
-Those bytes are a coordinate — that is the entire point of the test — and the
-project's own gate refuses to publish one.
+**What may be written down.** The record length, the type byte, which layout
+came back exact, the byte offsets that changed, and the **error distance** from
+the reference. **Never** the delta's contents, and never a coordinate, decoded
+or raw. Those bytes are the entire point of the test, and the project's own
+publication gate refuses to publish one regardless.
+
+**Promotes.** Whichever layout comes back exact, from its current grade to
+OBSERVED — for the **user-mark record type only**. The other two types remain
+untested, because only one record was created. It does **not** authorise a POI
+parser: deciding to decode a coordinate out of those bytes and print it is a
+separate decision, and `inspection.py` explains at length why it reports shapes
+rather than contents.
 
 **Promotes.** POI record framing for the user-mark type from UPSTREAM to
 OBSERVED. It does **not** authorise a POI parser: decoding the coordinate out of
@@ -838,8 +911,10 @@ establish which one is true, and both are acceptable outcomes:
 * The phone takes the link: the collector publishes `note: "link dropped"`,
   `status: reconnecting`, and `reconnects` increments. **Then check the
   backoff**: successive attempts must be roughly 5, 10, 20, 40 s apart with ±20%
-  jitter, never tighter than about 4 s, capped at 300 s. A tight retry loop
-  against a shared radio is the failure this test is really looking for.
+  jitter, never tighter than about 4 s, capped at 60 s. A tight retry loop
+  against a shared radio is the failure this test is really looking for — and
+  the ceiling is 60 s rather than 300 s so that a detector powering up with the
+  engine is picked up within a minute rather than within five.
 * The Pi keeps the link and the phone cannot connect. Record what the app shows.
 
 Then, either way: after the collector releases the link, does the detector start
@@ -1089,14 +1164,16 @@ will be met by somebody standing at the car.
 
 | Defect | Effect | Workaround |
 |---|---|---|
-| `LiveSession._render_detail` reads `poi.kind`, `poi.distance_raw` and `poi.speed_limit_raw`, which `PoiWarning` does not have | `live --full` raises `AttributeError` on the first active POI warning — exactly during V7 | Use `--json --full` |
-| `_safe_word` rejects any string containing a comma | Telemetry field 1's active form is recorded as `raw: null`; the collector keeps no other trace of it | Run V7 under `live` and read the raw capture |
-| `HistoryWriter.record_fix` is never called | The `gnss_fixes` table is always empty; GNSS data survives only where it is attached to an alert event | Read `vehicle_gnss` from `state-v2.json` during the session, not from the history afterwards |
+| ~~`LiveSession._render_detail` reads POI attributes `PoiWarning` does not have~~ **— was never true** | Checked against the code: `_render_detail` reads `poi.active` and `poi.raw`, both of which exist. `live --full` does not raise | None needed |
+| ~~`_safe_word` rejects any string containing a comma~~ **— resolved** | Telemetry field 1's active form used to be recorded as `raw: null`, with no other trace kept under `collect` | `_parse_poi_group` now sanitises with `_safe_group()`, which keeps the comma structure per sub-field; the text is also persisted to `telemetry.poi_raw`. See the rewritten V7 |
+| ~~`HistoryWriter.record_fix` is never called~~ **— was never true** | Traced end to end: `collector._record_history_fix` calls it whenever history *and* `gnss` are both enabled and a fix is present. The table was empty on hardware because no GNSS receiver was attached, which is the designed outcome, not a defect. A regression test now proves both directions | None needed |
 | `uniden-r8 history events --json` runs the rows through `publish()`, which refuses a document containing a coordinate | An uncaught `PublicationRefused` traceback when `record_coordinates` was on | Keep `record_coordinates = false`; the text table is unaffected |
-| The text history table prints `lat`/`lon` columns that the JSON path would refuse | The two output paths disagree about publishing coordinates | Same |
-| `inspection.py`'s docstring quotes upstream's POI record lengths as 13, 12 and 10 bytes; `CANDIDATE_RECORD_LENGTHS`, which the boundary walk uses, says 15, 14 and 12 | The printed candidate boundaries follow the constant, not the prose | Settle which is right from the V8 capture, then correct the other |
-| `[collector] stale_after_seconds` is validated and never read; the collector uses a hard-coded 10 s | Setting it has no effect | Do not rely on it |
-| The dashboard reads `d.telemetry` (schema 1 only, absent from schema 2, which calls it `detector`) and `d.detector_gps` (absent from both) | Every tile shows an em-dash when `[feed] detail = true`; the heading tile never shows a compass point either way | Leave `feed.detail = false` |
+| ~~The text history table prints `lat`/`lon` columns that the JSON path would refuse~~ **— resolved** | The publication gate only walks *keys* when handed JSON, so the table branch fell back to a decimal-pair regex and a lone latitude column would have passed. No coordinate could actually escape with the current schema, but the two branches were not equally protected | Both branches are now gated on the structured rows, before the rendering branch |
+| ~~The docstring says 13/12/10 and `CANDIDATE_RECORD_LENGTHS` says 15/14/12~~ **— resolved, differently** | Both numbers are now on file rather than in disagreement, and the instrument reports on both instead of blessing one | `inspection.CANDIDATE_LAYOUTS` holds them as separately graded hypotheses (`whole-record`, UPSTREAM-UNVERIFIED; `payload-plus-header`, INFERENCE); `evaluate_layouts()` decides from a capture. See the rewritten V8 |
+| ~~`[collector] stale_after_seconds` is validated and never read~~ **— was never true** | Checked against the code: the configured value travels on the state object into both document builders and the display line. `STALE_AFTER_SECONDS` is its default, not a hardcoded override | None needed |
+| ~~Retention runs once per process start and never again~~ **— resolved** | A collector installed as a service and left running carried rows past `retain_days` indefinitely | The writer thread also sweeps every `storage.PRUNE_INTERVAL_SECONDS` (six hours) |
+| ~~The alert slot gate rejects a detection over an unfamiliar band, direction or raw signal~~ **— resolved** | Every one of those vocabularies came from an R8w. On this detector any small difference would have rejected the slot and published "clear" while the screen showed a threat — during V2, the most valuable test here | The gate is now structural; an unfamiliar value marks itself unknown and the detection is published. A rejected slot also keeps its text now, instead of only a counter |
+| ~~The dashboard reads schema-1 keys that schema 2 does not emit~~ **— was never true** | Checked against `feed.py`: the page normalises, `const det = d.detector \|\| null` with a fall-back to `d.telemetry`, so one page serves both documents. `feed.detail = true` renders correctly | None needed |
 
 None of these affects the safety boundary: no write path, no OBD interaction and
 no publication of an address is involved in any of them.

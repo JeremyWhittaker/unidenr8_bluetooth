@@ -149,9 +149,24 @@ STALE_AFTER_SECONDS: Final[float] = 10.0
 
 #: Reconnect backoff.  Bounded and jittered so a detector that is switched off
 #: cannot produce a tight retry loop against a radio the vehicle is using.
+#:
+#: The ceiling used to be 300 s, and that was the wrong trade for a service that
+#: runs unattended.  A Pi left powered while the vehicle is parked spends the
+#: night failing to connect, so ``attempt`` climbs to the cap -- and then the
+#: engine starts, the detector powers up, and the collector waits up to five
+#: more minutes before trying again.  The first minutes of a drive are not
+#: interchangeable with any other minutes: they are the ones where the vehicle
+#: passes the supermarket doors, which is the cheapest lawful K-band source
+#: this project has and the whole point of running the collector at all.
+#:
+#: 60 s costs at most one lost minute and is defensible against the concern the
+#: cap exists for: connect attempts only happen while the OBD guard says the
+#: vehicle's link is healthy, each attempt is bounded by CONNECT_TIMEOUT_SECONDS,
+#: and `docs/EVIDENCE.md` §8 measured a five-minute *held* BLE session leaving
+#: the RFCOMM binding undisturbed -- a failed connect is strictly less than that.
 BACKOFF_BASE_SECONDS: Final[float] = 5.0
 BACKOFF_FACTOR: Final[float] = 2.0
-BACKOFF_MAX_SECONDS: Final[float] = 300.0
+BACKOFF_MAX_SECONDS: Final[float] = 60.0
 BACKOFF_JITTER: Final[float] = 0.2
 
 #: A session that lasted at least this long counts as healthy and resets the
@@ -276,7 +291,7 @@ def make_obd_probe(
 
         device_present = Path(device).exists()
 
-        _, rfcomm_out = query(["rfcomm"])
+        rfcomm_code, rfcomm_out = query(["rfcomm"])
         node = Path(device).name
         bound = any(
             line.strip().startswith(f"{node}:") for line in rfcomm_out.splitlines()
@@ -288,6 +303,22 @@ def make_obd_probe(
         if not device_present:
             return ObdHealth(False, rfcomm_active, device_present, bound,
                              f"{device} is missing")
+        if not bound and rfcomm_code != 0:
+            # "The tool could not run" and "nothing is bound" are the same
+            # observation from here, and reporting the second when the first is
+            # true sends the operator to look at the vehicle's link when the
+            # fault is on this host.  127 is a missing binary, 124 a timeout or
+            # OSError, and anything else is `rfcomm` itself failing -- which is
+            # what a sandbox denying AF_BLUETOOTH looks like, because listing
+            # bindings needs `socket(AF_BLUETOOTH, SOCK_RAW, BTPROTO_RFCOMM)`.
+            # In that state the collector waits in `obd-blocked` forever while
+            # systemd reports the unit healthy, so the distinction is the whole
+            # difference between a five-minute diagnosis and a lost drive.
+            #
+            # A successful listing exits 0 whether or not anything is bound, so
+            # this cannot mask a genuine "nothing is bound".
+            return ObdHealth(False, rfcomm_active, device_present, bound,
+                             "rfcomm could not be run")
         if not bound:
             return ObdHealth(False, rfcomm_active, device_present, bound,
                              f"{device} is not bound")
@@ -687,11 +718,22 @@ def _write_atomic(target: Path, payload: str) -> None:
     temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
     previous = os.umask(0o077)
     try:
-        temporary.write_text(payload, encoding="utf-8")
-    finally:
-        os.umask(previous)
-    os.chmod(temporary, FILE_MODE)
-    os.replace(temporary, target)
+        try:
+            temporary.write_text(payload, encoding="utf-8")
+        finally:
+            os.umask(previous)
+        os.chmod(temporary, FILE_MODE)
+        os.replace(temporary, target)
+    except Exception:
+        # Remove the partial file before re-raising.  The caller counts the
+        # failure and carries on, so without this the temporary survives -- and
+        # the usual cause of a failure here is a full card, where leaking a file
+        # per attempt makes the thing that broke worse.  The name carries the
+        # pid, and `Restart=always` guarantees a fresh pid on every restart, so
+        # they would accumulate rather than overwrite.
+        with contextlib.suppress(OSError):
+            temporary.unlink()
+        raise
 
 
 async def publish_state_async(

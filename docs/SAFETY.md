@@ -261,8 +261,11 @@ git-ignored directory; they reach a printed terminal only on an explicit
 carrying a coordinate. See §3, "Position is now a category of its own".
 
 The bounded `live` command itself remains a one-shot diagnostic. The separate
-collector below is the only continuous path and its unit is not installed by
-this repository.
+collector below is the only continuous path. Its unit is installed by
+`scripts/install-service.sh`, which needs `sudo` for exactly three things —
+writing one unit file, reloading the manager, and starting one unit — and
+touches no other unit. It never restarts, edits, enables or disables
+`hummer-rfcomm`, `bluetooth`, or the display service.
 
 ### The event path
 
@@ -378,10 +381,20 @@ strings, because prose legitimately discusses stopping things.
 collector refuse rather than silently steal the link, and it is released on
 every exit path.
 
-**Bounded reconnection.** Exponential backoff from 5 s to a 300 s cap with ±20%
+**Bounded reconnection.** Exponential backoff from 5 s to a 60 s cap with ±20%
 jitter, reset only after a session that lasted at least 30 s. Without that last
 condition a link that connects and immediately drops looks like success and
 retries instantly, forever.
+
+The cap was 300 s and is now 60 s, which is a deliberate loosening. A Pi left
+powered while the vehicle is parked spends the night failing to connect, so the
+backoff reaches its ceiling — and then the engine starts, the detector powers
+up, and the collector waits up to another five minutes. The first minutes of a
+drive are not interchangeable with any other minutes. Connect attempts only
+happen while the OBD guard reports the vehicle's link healthy, each one is
+bounded by a 25 s connect timeout, and `docs/EVIDENCE.md` §8 measured a
+five-minute *held* BLE session leaving the RFCOMM binding undisturbed — a failed
+connect is strictly less than that.
 
 **The trial deadline is enforced twice:** inside the streaming loop and by an
 outer asyncio ceiling around the complete BLE session. The outer ceiling also

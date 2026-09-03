@@ -83,7 +83,7 @@ __all__ = [
 #: is diagnostic history, not a system of record, and a version mismatch is
 #: reported so the operator can archive the old file rather than silently
 #: reinterpreting rows written under different meanings.
-SCHEMA_VERSION: Final[int] = 2
+SCHEMA_VERSION: Final[int] = 3
 
 #: Cap on the write queue.  Everything here is small; a backlog this deep means
 #: the disk has stopped answering, and dropping is better than growing.
@@ -125,6 +125,21 @@ PRUNE_MAX_FRACTION: Final[float] = 0.25
 #: take nine rows a sweep from a table of any size, which is the slow version
 #: of the same failure.
 PRUNE_MIN_TABLE_ROWS: Final[int] = 20
+
+#: How often the writer thread sweeps retention after the first sweep at start.
+#:
+#: Retention used to run exactly once, when the writer opened the database.  A
+#: collector started by hand for an hour was therefore swept every time, and a
+#: collector installed as a service and left alone for a month was swept once --
+#: which is precisely backwards, because only the second one accumulates.  At
+#: one telemetry row a second a full day is around 86k rows, so a service that
+#: survives a fortnight of driving would carry the whole fortnight regardless of
+#: ``retain_days``, on an SD card.
+#:
+#: Six hours is short enough that no realistic drive outgrows its window and
+#: long enough that the sweep is never in the way of a write.  It runs on the
+#: writer thread, like every other statement here, so it is off the event loop.
+PRUNE_INTERVAL_SECONDS: Final[float] = 6 * 60 * 60.0
 
 #: Tables the retention sweep applies to, with the column that dates each row.
 _PRUNABLE: Final[tuple[tuple[str, str], ...]] = (
@@ -211,6 +226,8 @@ _SCHEMA: Final[tuple[str, ...]] = (
         voltage       REAL,
         gps_locked    INTEGER,
         poi_active    INTEGER,
+        poi_raw       TEXT,
+        poi_suspect   INTEGER,
         direction_8   TEXT,
         speed_mph     INTEGER,
         altitude_ft   INTEGER,
@@ -393,11 +410,57 @@ class History:
         if row is None:
             raise HistoryError(f"{self.path} has no schema marker")
         if row["value"] != str(SCHEMA_VERSION):
+            if self._migrate(row["value"]):
+                return
             raise HistoryError(
                 f"{self.path} is schema {row['value']}, this build writes "
                 f"{SCHEMA_VERSION}.  Move the old file aside rather than "
                 f"mixing rows written under different meanings."
             )
+
+    def _migrate(self, found: str) -> bool:
+        """Apply an additive upgrade, or return ``False`` to refuse.
+
+        Only ever *adds* columns, and only for the steps listed here.  Nothing
+        is rewritten and nothing is dropped, so a row written under an older
+        schema keeps exactly the meaning it had: the new columns read NULL,
+        which is the truth -- that reading did not record them.
+
+        This exists because a bare refusal is the wrong failure for a service.
+        The refusal raises inside the writer thread, which records the error and
+        returns; the collector then keeps running, keeps publishing a healthy
+        state document, and silently writes nothing.  On a vehicle that means
+        the first upgrade after an install quietly stops capturing drives, and
+        nobody finds out until they go looking for a detection that should have
+        been there.  A refusal is still correct for a change of *meaning*; this
+        handles only the case where the old rows are still true.
+        """
+        steps = {
+            # 2 -> 3: the POI warning's text and its coordinate tripwire.  The
+            # text used to be discarded by the parser, so there was nothing to
+            # store; it survives now, and a drive past a known camera is only
+            # analysable afterwards if it was written down at the time.
+            "2": [
+                "ALTER TABLE telemetry ADD COLUMN poi_raw TEXT",
+                "ALTER TABLE telemetry ADD COLUMN poi_suspect INTEGER",
+            ],
+        }
+        if found not in steps:
+            return False
+        connection = self.connection
+        connection.execute("BEGIN")
+        try:
+            for statement in steps[found]:
+                connection.execute(statement)
+            connection.execute(
+                "UPDATE meta SET value = ? WHERE key = 'schema'",
+                (str(SCHEMA_VERSION),),
+            )
+            connection.execute("COMMIT")
+        except Exception:
+            connection.execute("ROLLBACK")
+            return False
+        return True
 
     # ---------------------------------------------------------------- write
 
@@ -890,16 +953,24 @@ class HistoryWriter:
             (gps.direction_8, gps.speed_mph, gps.altitude_ft)
             if self.record_motion else (None, None, None)
         )
+        poi = getattr(reading, "poi", None)
+        # The POI text sits behind the same opt-in as heading, speed and
+        # altitude, for the same reason: "SPEEDCAM,500,35" says which fixed
+        # camera the vehicle is beside, which is a position by another route.
+        # The tripwire flag is recorded either way -- it carries no content, and
+        # a reading that was withheld must not look like one that was empty.
+        poi_raw = poi.raw if (poi is not None and self.record_motion) else None
+        poi_suspect = int(bool(poi.suspect_pair)) if poi is not None else None
         self._offer(
             "INSERT INTO telemetry (session_id, at, wall_ns, monotonic_ns, "
-            "voltage, gps_locked, poi_active, direction_8, speed_mph, "
-            "altitude_ft, status_raw, warning_raw, scan_raw) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "voltage, gps_locked, poi_active, poi_raw, poi_suspect, "
+            "direction_8, speed_mph, altitude_ft, status_raw, warning_raw, "
+            "scan_raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 self._session_id, _iso(wall_ns), wall_ns, monotonic_ns,
                 reading.voltage,
                 None if reading.gps_locked is None else int(reading.gps_locked),
-                int(bool(reading.poi_warning)),
+                int(bool(reading.poi_warning)), poi_raw, poi_suspect,
                 *motion,
                 gps.status_raw, reading.warning_raw, reading.scan_raw,
             ),
@@ -947,6 +1018,7 @@ class HistoryWriter:
 
         batch: list[_Write] = []
         last_commit = time.monotonic()
+        last_prune = time.monotonic()
         stopping = False
         while not stopping:
             timeout = max(0.05, BATCH_SECONDS - (time.monotonic() - last_commit))
@@ -979,6 +1051,19 @@ class HistoryWriter:
                 last_commit = time.monotonic()
             elif due:
                 last_commit = time.monotonic()
+
+            # Sweep on a timer, not only at start.  Deliberately after the
+            # commit and only between batches, so a sweep can never sit between
+            # rows of the same batch, and guarded like every other statement on
+            # this thread: a retention failure must degrade to "the database
+            # grows", never to "the collector stopped recording".
+            if not stopping and time.monotonic() - last_prune >= PRUNE_INTERVAL_SECONDS:
+                last_prune = time.monotonic()
+                try:
+                    self.pruned += history.prune(self.retain_days, self.max_rows)
+                    self.prune_refused = history.last_prune().get("refused", [])
+                except Exception:  # noqa: BLE001 - reported via status, never raised
+                    self.errors += 1
 
         with contextlib.suppress(Exception):
             history.end_session(self._session_id, ended_at=_iso(time.time_ns()))

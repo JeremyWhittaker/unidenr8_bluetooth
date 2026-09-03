@@ -120,7 +120,7 @@ reversible command, a captured response and a readback — not as a feature flag
 |---|---|
 | A moving one-to-two-hour endurance test with active OBD polling | **deferred.** The existing evidence is a parked five-minute trial with the OBD collector idle. |
 | Move the R8 to a dedicated USB adapter if the shared controller is unstable | done (support) | `collector.adapter` pins BlueZ via `bluez={"adapter": …}`; not needed yet |
-| Install the unit with restart backoff, a health check and bounded logs | done (template) | `systemd/unidenr8-collector.service`, not installed by anything here |
+| Install the unit with restart backoff, a health check and bounded logs | done | `systemd/unidenr8-collector.service`, installed by `scripts/install-service.sh`, which templates every path from the tree, refuses to install unless `selftest` passes, and verifies against the telemetry counter rather than `systemctl` |
 | Document that the Pi owns the detector's single BLE connection while running | done | `README.md`, `docs/RUNBOOK.md` |
 
 ---
