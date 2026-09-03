@@ -110,8 +110,21 @@ writing, before touching code.
 
 ## Things that will surprise you
 
-**The live telemetry carries no latitude or longitude — which is narrower than "the detector has no
-position."** The four-field GPS sub-group is exactly the width a coordinate pair would need; it has
+**The detector will give you a coordinate — just not in the telemetry.** Both halves matter.
+
+The live telemetry carries no latitude or longitude, and that is measured harder than anything else
+here: the four-field GPS sub-group is exactly the width a coordinate pair would need, the fields were
+read, the first is a compass point, and 2,636 packets from a moving vehicle went by with the
+coordinate tripwire silent.
+
+But on 2026-09-03 one press of the detector's own MARK button added a 10-byte type-03 record to its
+POI database that decodes to a legal coordinate it derived from its own fix — read back over BLE with
+no write path, the first non-empty POI read reported on any R-series unit. It also settled the record
+layout: 13/12/10 consumed the blob exactly, and this project's own 15/14/12 reading is refuted.
+`EVIDENCE.md` §13. What is *not* established is that the coordinate is accurate, or that the add is
+reversible; §13.3 says so.
+
+**The narrower original point still stands.** The four-field GPS sub-group is exactly the width a coordinate pair would need; it has
 been read on this R8, and the first field is a compass point. There is a tripwire in
 `_parse_gps_group`, and the same mechanism now in `_parse_poi_group`, that fires if two adjacent
 sub-fields ever both look like decimal degrees — if it fires, this paragraph is wrong and the
@@ -186,6 +199,7 @@ src/uniden_r8/
   pairing.py      the one guarded bluetoothctl call
   identity.py     Device Information reads
   inspection.py   the confirmed settings/POI dump, and the layout adjudicator
+  survey.py       enumerates the device's own GATT tree; reads no value
   poi_diff.py     offline comparison of two POI captures; prints no coordinate
   collector.py    the long-running process that wires it together
   cli.py          the command surface
