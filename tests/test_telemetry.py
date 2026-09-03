@@ -910,3 +910,38 @@ def test_a_truncated_packet_holds_a_live_track_open():
             wall_ns=seq * 1_000, hold_open=truncated.uncertain,
         )
     assert len(tracker) == 1, "a truncated packet ended a live threat"
+
+
+def test_the_gps_status_letter_d_reports_no_fix():
+    """`D` means no fix, and saying so is better than saying "unknown".
+
+    Measured, not assumed: a 50-minute drive from a cold start produced
+    E -> D -> C in order, and the heading field was present in exactly the rows
+    whose status was C and in none of the others. A collector that reported
+    "unknown" for the three minutes of every cold start would be under-reporting
+    something the detector was stating plainly.
+    """
+    reading = telemetry.parse_telemetry(b"13.2&0&,0,0,D&0&12&N&N")
+    assert reading.gps.status_raw == "D"
+    assert reading.gps.locked is False
+    assert reading.publishable()["gps_locked"] is False
+
+
+def test_the_gps_status_letter_c_reports_a_fix():
+    """The other half of the same observation, and the older of the two."""
+    reading = telemetry.parse_telemetry(b"13.2&0&NE,42,1289,C&0&12&N&N")
+    assert reading.gps.locked is True
+    assert reading.gps.direction_8 == "NE"
+
+
+def test_an_unfamiliar_gps_status_letter_stays_unknown():
+    """`E` has been seen twice. Two samples is not a meaning.
+
+    "We could not tell" and "there is no fix" are different facts, and a field
+    that collapses them tells a consumer it knows something it does not. This is
+    the control that stops the next letter being guessed at.
+    """
+    for letter in (b"E", b"Z"):
+        reading = telemetry.parse_telemetry(b"13.2&0&,0,0," + letter + b"&0&12&N&N")
+        assert reading.gps.locked is None, letter
+        assert reading.publishable()["gps_locked"] is None, letter

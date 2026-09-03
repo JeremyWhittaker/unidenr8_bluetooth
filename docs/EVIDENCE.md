@@ -822,3 +822,117 @@ telemetry.** §10.8 stands: the GPS sub-group's first field is a compass point
 and the coordinate tripwire did not fire. What is now *also* true is that this
 is a statement about the **live telemetry packet only** — see `README.md` and
 §11.7 for the stored-record question, which is open and testable.
+
+---
+
+## 12. The first drive — a 50-minute commute, moving
+
+Session 11 on the vehicle node, 2026-09-03. The first data this project has ever
+had from a vehicle in motion. The node was powered throughout and merely
+**off the network**, which is why the capture survived: the collector writes to
+local SQLite and needs no network at all.
+
+| | |
+|---|---|
+| Telemetry rows | **2,636** |
+| Unparsed | **0** |
+| Duration | 49.7 min (monotonic) |
+| Rows with the vehicle moving | 1,165 |
+| Compass headings observed | **8 of 8** |
+| Alert packets | 2, both all-clear (`0&0&0&0`) |
+| Gaps over 5 s between stored rows | 1 (88 s) |
+
+### 12.1 The GPS status letter decoded, by correlation — OBSERVED
+
+The session captured the full cold-start sequence and the transition that gives
+the letters meaning:
+
+| Letter | Rows | Rows with a heading | Rows moving | Altitude range |
+|---|---|---|---|---|
+| `E` | 2 | 0 | 0 | 0 |
+| `D` | 180 | 0 | 0 | 0 |
+| `C` | 2,454 | **2,454** | 1,165 | 0 – 1,289 |
+
+The heading field is present in **exactly** the rows whose status is `C`, and in
+none of the 182 that are not — 2,454 of 2,454, across a single continuous
+session, with speed and altitude reading zero throughout `E` and `D`.
+
+That is a measured correlation rather than a reading of upstream, so:
+
+* **`C` = a fix.** OBSERVED.
+* **`D` = no fix.** OBSERVED — `DetectorGps.locked` now returns `False` for it
+  rather than `None`.
+* **`E` = unknown.** Seen twice, both times on the first packet after the link
+  came up. Two samples is not a meaning, and it still returns `None`.
+
+The distinction between "we could not tell" and "there is no fix" is kept
+deliberately: a field that collapses them tells a consumer it knows something it
+does not.
+
+### 12.2 Altitude is not metres — OBSERVED (by exclusion)
+
+With a fix present, altitude read **1,116 ft mean** across 2,454 samples, ranging
+to 1,289. The test route's true elevation is within a couple of hundred feet of
+that figure. Read as metres the same numbers would place the vehicle around
+3,700 ft up, which it demonstrably was not.
+
+This **refutes metres**. It does not by itself prove feet — that needs a
+reference altimeter, and V1 stays open for it — but upstream's reading of the
+field as feet is now consistent with measurement rather than merely inherited.
+No location is recorded here or anywhere else; only the relation.
+
+### 12.3 Speed — still open, and one answer would close it
+
+While a fix was present the distribution was strongly bimodal: 1,289 samples
+stopped, a long tail through the twenties and thirties, and then **403 samples
+at 65 and above**, peaking at **83**.
+
+That shape is a commute — surface streets, then sustained higher speed. Read as
+mph the fast cluster is an ordinary freeway. Read as km/h it is 40–52 mph
+sustained, which is possible but does not fit the shape as well.
+
+**This is not yet evidence.** What would settle it in one sentence is the
+driver's own recollection of the trip's top speed, or a single reference GNSS
+run. Until then the field is published as `speed_raw` with
+`"speed_unit": "unknown (upstream reads it as mph)"`, exactly as before.
+
+### 12.4 The wall clock stepped 104 minutes mid-session — OBSERVED
+
+One sample pair in the session shows the wall clock advancing **6,244 s** while
+the monotonic clock advanced **2 s**. Exactly one such step; every other pair
+agrees.
+
+The board has no battery-backed clock, so this is the hazard the two-clock
+design was built for, now measured rather than anticipated. The consequences are
+worth stating plainly:
+
+* **Durations and ordering are correct.** They come from `monotonic_ns`. The
+  49.7 min above is trustworthy.
+* **Wall timestamps before the step are wrong**, by up to 104 minutes. Anything
+  that correlates this session against an external log by `at` or `wall_ns`
+  will mis-align, and the session's apparent wall span of 154 minutes is an
+  artefact.
+* **Retention was unaffected**, because the sweep measures from
+  `min(now, tenth-newest row)` rather than from `now` — §9.
+
+### 12.5 No alert, and that is a true negative
+
+Two alert notifications arrived in fifty minutes, both `0&0&0&0`, both parsed
+cleanly. The driver independently reported seeing no alert on the detector's own
+display for the whole trip.
+
+So the characteristic notifies on **change**, not on a timer, and the silence is
+the detector's, not the parser's. That is worth recording precisely because a
+parser bug and a quiet drive look identical in a row count — this one is
+corroborated by the operator.
+
+**Every active-alert field therefore remains UPSTREAM.** Fifty minutes of
+motion, zero detections. V2 is unchanged and is still the highest-value work
+available.
+
+### 12.6 What this drive did establish about the software
+
+2,636 packets decoded in motion with **0 unparsed** and one 88-second gap. The
+decoder, the ingest queue, the history writer and the 1 Hz throttle all held up
+on a moving vehicle for the first time, on the target hardware, with the OBD
+link bound.

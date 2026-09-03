@@ -439,13 +439,30 @@ class DetectorGps:
 
     @property
     def locked(self) -> bool | None:
-        """Whether the detector reports a fix, or ``None`` if unknowable."""
+        """Whether the detector reports a fix, or ``None`` if unknowable.
+
+        ``C`` means a fix and ``D`` means no fix.  Both are measured, not
+        assumed: one 50-minute drive from a cold start produced
+        ``E`` -> ``D`` -> ``C`` in that order, and the heading field was present
+        in exactly the 2454 rows whose status was ``C`` and in none of the 182
+        that were not -- a perfect correlation across the whole session, with
+        speed and altitude reading zero throughout ``E`` and ``D``.
+        ``docs/EVIDENCE.md`` §12 has the counts.
+
+        ``E`` stays ``None``.  It has been seen twice, both times on the first
+        packet after the link came up, and two samples is not a meaning.  The
+        distinction matters more here than it looks: "we could not tell" and
+        "there is no fix" are different facts, and a field that collapses them
+        tells a consumer it knows something it does not.
+        """
         if not self.evaluated:
             return None
         if not self.present:
             return False
         if self.status_raw == "C":
             return True
+        if self.status_raw == "D":
+            return False
         return None
 
     def detailed(self) -> dict[str, Any]:

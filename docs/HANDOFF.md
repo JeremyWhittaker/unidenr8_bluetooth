@@ -49,9 +49,18 @@ measurement.
 
 None of that changed with the service build, and it is worth saying plainly because the build looks
 like progress. The three biggest gaps are exactly what they were: **no real alert has ever been
-captured**, **nothing has been validated with the vehicle moving** -- every heading, speed and
+captured**, **the speed field's units are still unmeasured** -- every heading, speed and
 altitude reading so far, including the ones recorded once `record_detector_motion` was switched on,
-is from a parked vehicle -- and **the POI/user-mark coordinate experiment has never been run**.
+was from a parked vehicle until the commute in `EVIDENCE.md` §12 -- and **the
+POI/user-mark coordinate experiment has never been run**.
+
+That commute closed more than it looks. 2,636 packets in motion, 0 unparsed, all
+eight compass headings, and the GPS status letter decoded by correlation rather
+than by reading upstream: `C` is a fix and `D` is no fix, measured across 2,454
+rows of perfect agreement between the letter and whether a heading was present.
+Altitude is now *refuted* as metres. What it did not close is speed, which needs
+one reference run or one recollection of a top speed, and the alert path, which
+saw fifty minutes of motion and nothing to detect.
 
 What did change is that the first real alert is now much more likely to survive contact with the
 parser. The slot gate used to reject a whole detection over a band string, a direction code or a raw

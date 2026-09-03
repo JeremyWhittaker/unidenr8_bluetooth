@@ -58,8 +58,8 @@ alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             
 | Capability | Status |
 |---|---|
 | Discovery, pairing, identity, live telemetry | **Verified on hardware** — 508/508 packets parsed across four runs |
-| Voltage, GPS fix state | **Verified** |
-| Detector heading, speed, altitude | **Decoded**; units still need a moving capture |
+| Voltage, GPS fix state | **Verified** — the status letter decoded by correlation over a full cold start: `C` is a fix, `D` is not |
+| Detector heading, speed, altitude | **Decoded, and captured moving** — 2,636 packets, 0 unparsed, all 8 headings. Altitude is refuted as metres; speed's units are still open |
 | Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
 | Coordinates *stored* by the detector | **Open question.** It can save a user mark from its own fix, and that record is readable. Untested here — see [below](#the-coordinate-question). |
 | Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
