@@ -678,10 +678,31 @@ class _StubGnssClient:
         await stop.wait()
 
 
-def _gnss_fix_count(history_path) -> int:
+def _row_counts(history_path) -> tuple[int, int]:
+    """``(telemetry rows, gnss_fixes rows)`` from a database the collector wrote.
+
+    Both, always, because the interesting assertion is the *relationship*.
+    "gnss_fixes is empty" means nothing on its own -- it is also what a run that
+    never got going produces -- so every claim here is stated against the
+    telemetry count, which proves the collector actually ran.
+    """
     with storage.History(history_path, read_only=True) as history:
-        cursor = history.connection.execute("SELECT count(*) FROM gnss_fixes")
-        return cursor.fetchone()[0]
+        rows = history.connection.execute(
+            "SELECT (SELECT count(*) FROM telemetry), (SELECT count(*) FROM gnss_fixes)"
+        ).fetchone()
+    return rows[0], rows[1]
+
+
+#: Long enough that a loaded CI runner still gets the collector through connect,
+#: subscribe, first packet and one pump iteration.
+#:
+#: This was 0.2 s and it was flaky: the run passed locally and on two of three
+#: Python versions in CI, and failed on the third with a bare ``assert 0 > 0``.
+#: A test that is usually right is worse than one that is wrong, because it
+#: teaches people to re-run it.  Nothing here waits on the wall clock for its
+#: *result* -- the assertions are about counts -- so the only job of this number
+#: is to stop the environment deciding the outcome.
+_HISTORY_TRIAL_SECONDS = 1.0
 
 
 def test_the_collector_fills_gnss_fixes_end_to_end_through_the_history_writer(
@@ -713,13 +734,18 @@ def test_the_collector_fills_gnss_fixes_end_to_end_through_the_history_writer(
     client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY)])
     asyncio.run(
         collector.run(
-            RANDOM_STATIC, state_dir, duration=0.2,
+            RANDOM_STATIC, state_dir, duration=_HISTORY_TRIAL_SECONDS,
             obd_probe=lambda: HEALTHY, client_factory=lambda a: client,
             install_signal_handlers=False, config=settings,
         )
     )
 
-    assert _gnss_fix_count(settings.history_path) > 0
+    telemetry_rows, fixes = _row_counts(settings.history_path)
+    assert telemetry_rows > 0, "the collector never ran; the trial was too short"
+    assert fixes > 0, (
+        f"{telemetry_rows} telemetry rows were written and no GNSS fix was -- "
+        "record_fix is not reachable"
+    )
 
 
 def test_gnss_fixes_stays_empty_when_gnss_is_disabled(tmp_path, monkeypatch):
@@ -744,13 +770,18 @@ def test_gnss_fixes_stays_empty_when_gnss_is_disabled(tmp_path, monkeypatch):
     client = FakeClient(emit=[(gatt.TELEMETRY_UUID, TELEMETRY)])
     asyncio.run(
         collector.run(
-            RANDOM_STATIC, state_dir, duration=0.2,
+            RANDOM_STATIC, state_dir, duration=_HISTORY_TRIAL_SECONDS,
             obd_probe=lambda: HEALTHY, client_factory=lambda a: client,
             install_signal_handlers=False, config=settings,
         )
     )
 
-    assert _gnss_fix_count(settings.history_path) == 0
+    telemetry_rows, fixes = _row_counts(settings.history_path)
+    # Asserted against the telemetry count on purpose: without it this test
+    # passes just as happily when the collector never started, which would make
+    # it a control that cannot fail.
+    assert telemetry_rows > 0, "the collector never ran; the trial was too short"
+    assert fixes == 0
 
 
 
