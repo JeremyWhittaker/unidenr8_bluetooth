@@ -759,6 +759,46 @@ strings mean two entirely different faults:
 A service that is healthy by every signal systemd offers and captures nothing is
 the worst available failure, because nobody goes looking for it.
 
+**A drive recorded nothing at all, and the node is unreachable.** Separate the
+two failures before touching anything, because they look identical from here and
+have opposite responses:
+
+* **Powered, but off the network.** The collector needs no network. It writes to
+  local SQLite regardless of Tailscale, WiFi or an LTE modem being up; the
+  network is only how you *watch* it. A drive taken while the node was
+  network-isolated is on the SD card, intact, waiting. Run
+  `./scripts/drive-report.sh` once it is reachable.
+* **Powered off.** Nothing was recorded, and nothing can be recovered.
+
+`uptime -s` on the node answers it: a boot timestamp after the drive began means
+it was down for some of it.
+
+**The node did not come back when the vehicle started.** This is a power-path
+problem, not a software one, and it is the single largest threat to unattended
+capture — it has cost two drives.
+
+The pack in this vehicle is a **PiSugar2 (IP5209), which cannot power the Pi
+back on.** `toggle_power_restore` is a PiSugar 3 feature and reports "not
+supported" on this chip. Once it cuts output, only the physical switch or a
+scheduled RTC alarm restores it. So any arrangement where the Pi fully powers
+down while the pack owns the power path strands the node until somebody walks
+out to the vehicle, and no amount of configuration in this repository changes
+that.
+
+`hummer_obdII/docs/RUNBOOK.md`, "Battery watch and graceful shutdown", carries
+the full analysis and owns the decision. Its conclusion, in short: run from
+ignition-switched vehicle power with a read-only root, keep any pack as a UPS
+that never cuts, and accept that a dirty cut costs seconds rather than the
+filesystem. This project's storage is already built for that — WAL with
+`synchronous=NORMAL`, and `docs/EVIDENCE.md` records a verified recovery after
+an abrupt kill — so the residual risk is the operating system's filesystem,
+not the history database.
+
+Two things to check before blaming the pack: `uptime -s`, and whether
+`/etc/default/hummer-battery` sets `--on-low poweroff` rather than the default
+`stop-collector`. The default deliberately does *not* halt, for exactly this
+reason.
+
 **A drive recorded rows but no heading, speed or altitude.** Those three columns
 are written only when `[history] record_detector_motion` is on, and it defaults
 to off. See "A validation drive" in `docs/CONFIGURATION.md`. The default is

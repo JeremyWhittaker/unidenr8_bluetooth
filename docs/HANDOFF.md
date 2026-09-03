@@ -216,6 +216,13 @@ rationale, a single reversible command, a captured response, and a readback — 
 - **`hummer_obdII`** (sibling repository) reads `.state/state.json` for its e-paper display. It
   requires `schema == 1`, a recent timestamp, and typed allowlisted fields, and falls back cleanly
   when the state is missing or stale. That is why schema 1 is frozen.
+- **The node's power path** decides whether this project collects anything at
+  all, and it is not ours. The vehicle's PiSugar2 (IP5209) **cannot power the Pi
+  back on** after it cuts, so a node that powers down stays down until somebody
+  reaches the vehicle. Two drives have been lost to this. The analysis and the
+  decision live in `hummer_obdII/docs/RUNBOOK.md`, "Battery watch and graceful
+  shutdown"; the symptom and the triage are in [`RUNBOOK.md`](RUNBOOK.md),
+  "Troubleshooting".
 - **`hummer-rfcomm.service`** owns `/dev/rfcomm0`. This project queries its state and never touches
   it. The unit and device path are configuration, not constants.
 - **`gpsd`**, if present, on the loopback port. Optional.
