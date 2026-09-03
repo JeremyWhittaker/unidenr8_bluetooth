@@ -172,6 +172,23 @@ for session in rows:
             if len(headings) == 1:
                 print("      only one heading: a turn is what validates this field")
 
+    # The GPS status letter.  `C` is the only value this project had ever seen
+    # until a cold start produced `D`; the transition between them, caught in one
+    # session, is what gives either letter a meaning.
+    letters = q(
+        "SELECT status_raw s, count(*) c, min(monotonic_ns) first_ns "
+        "FROM telemetry WHERE session_id = ? AND status_raw IS NOT NULL "
+        "GROUP BY status_raw ORDER BY first_ns", (sid,)).fetchall()
+    if letters:
+        order = " -> ".join(f"{r['s']}({r['c']})" for r in letters)
+        print(f"  gps status letters  {order}")
+        if len(letters) > 1:
+            print("      a TRANSITION was captured -- this is what gives the letters")
+            print("      a meaning. Check whether heading/speed/altitude became")
+            print("      non-zero at the change, and record it in docs/EVIDENCE.md.")
+        elif letters[0]["s"] != "C":
+            print(f"      only {letters[0]['s']}, never C: no fix for the whole session")
+
     unparsed = q(
         "SELECT count(*) c FROM telemetry WHERE session_id = ? AND voltage IS NULL",
         (sid,)).fetchone()["c"]

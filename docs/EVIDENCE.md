@@ -769,6 +769,42 @@ Swapping one guess for the other would have destroyed the record of the
 disagreement without producing any evidence. The tool decides now, and one
 capture settles it.
 
+### 11.9 The GPS status letter has at least three values, not one — OBSERVED
+
+Until this session the GPS sub-group's status field had exactly one observed
+value: `C`, seen while the detector reported a fix (§10). Everything else about
+that field was upstream's.
+
+A cold start — the Pi and the detector both powering up with the engine, from
+genuinely off — produced two more, in this order:
+
+| Letter | Rows | When |
+|---|---|---|
+| `E` | 1 | the first packet after the link came up |
+| `D` | 111 | every packet after it, for the rest of the window |
+| `C` | — | previously observed, with a fix present |
+
+Throughout the `E`/`D` window the other three GPS sub-fields read
+`direction_8 = (absent)`, `speed = 0`, `altitude = 0`, while battery voltage rose
+from 12.2 V to 13.5 V as the engine started. The vehicle was stationary.
+
+**The letters are OBSERVED. What they mean is INFERENCE**, and deliberately not
+written into the code: `DetectorGps.locked` maps `C` to true and *everything
+else to `None`*, not to false. "We could not tell" and "there is no fix" are
+different facts, and a detector that is searching must not publish the same
+thing as one that has failed.
+
+The obvious reading is that `E` and `D` are stages of acquisition and `C` is a
+fix. That is not yet evidence. What would make it evidence is a single session
+containing the transition, with the motion fields becoming non-zero at the same
+row — which is exactly what a drive starting from a cold vehicle should produce.
+`scripts/drive-report.sh` prints the letter sequence and calls out a transition
+for that reason.
+
+Until then, do not name these letters in code or publish an interpretation of
+them. Two of the three have been seen only once each, on one firmware, on one
+morning.
+
 ### 11.8 What this session still did not establish
 
 **No active alert.** Unchanged, and still the largest gap. V2.
