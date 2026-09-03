@@ -1241,3 +1241,67 @@ on it at best.
 
 **The `unknown` second byte** of every record type. Present in all four
 captures, never interpreted, and not worth guessing at.
+
+---
+
+## 14. The BLE command works
+
+2026-09-03, at the operator's explicit and repeated instruction, one
+`BTreqUMRK:1` was written to the Uniden command characteristic
+(`2c86686a-…`) and the POI characteristic was read before and after.
+
+**It worked.** The detector accepted the command and stored a user mark, and the
+record decoded to a coordinate. Confirmed by the operator against his own
+position.
+
+This has never been demonstrated on any R-series detector by anyone. Upstream
+documented the command from a decompiled app and recorded that it had never been
+sent to hardware; this project had carried it as
+`KNOWN_WRITE_COMMANDS`-for-documentation-only for the same reason. It is now
+**OBSERVED** on a non-W R8 at firmware 1.43.
+
+### 14.1 How it was done, and what was deliberately not done
+
+The experiment ran as a **standalone script outside the package**, on the node,
+uncommitted. It imported none of the gated helpers and left the AST audit and
+the "no application-characteristic write path" property in the repository
+completely intact.
+
+That was not a technicality to be proud of; it was the cheap order of
+operations. Nobody had ever sent this command to hardware, so the first question
+was "does it do anything at all", not "how should it be productionised".
+Answering it took two minutes. Restructuring `gatt.py`, `audit.py`, the command
+surface, the tests and four documents to open the write path permanently would
+have been hours, and wasted if the command had been inert or wrong.
+
+**The package still has no write path.** Nothing in `src/uniden_r8/` writes an
+application value to a vendor characteristic, `selftest` still proves it, and
+that claim is still true of everything this project installs and runs.
+
+### 14.2 What this changes, and what it does not
+
+**Changed:** a user mark can be created without touching the detector. The
+coordinate the detector derives is accurate — §13.5 and §13.11 measured 8.0 m
+and 3.8 m at two locations.
+
+**Not changed, and worth restating because "it works" invites forgetting them:**
+
+* **Every command writes to flash.** Marks are persistent detector state.
+* **Deletion is still unobserved.** `BTreqUMRK:0` exists in the decompiled
+  vocabulary in both a bare and a coordinate-targeted form, and neither has been
+  sent. Until one has, marks accumulate with no proven way to remove them.
+* **It is still not a live position source.** Flash wear caps the rate, and
+  §13.10's moving window means a mark written while driving cannot reliably be
+  read back. A USB GNSS receiver remains the answer for continuous coordinates,
+  and this remains a protocol result rather than a feature.
+
+### 14.3 Reading a coordinate back
+
+A separate one-off script read the POI characteristic and decoded every record
+to latitude and longitude, printed to the owner's own terminal at his request.
+The values were correct.
+
+No coordinate was written to any file, any document, or this repository. The
+publication gate still refuses positions, the repository hygiene scan still
+looks for them in every committable file, and this section records that the
+decode was correct without recording what it decoded.

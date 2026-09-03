@@ -11,6 +11,13 @@
 #     ./scripts/install-service.sh                 # install, enable at boot, start
 #     ./scripts/install-service.sh --no-enable     # install and start, not at boot
 #     ./scripts/install-service.sh --dry-run       # print the unit, change nothing
+#     ./scripts/install-service.sh --allow-user-control
+#           ... and drop a sudoers rule letting this account start and stop
+#           THIS ONE UNIT without a password. Reading the POI or settings
+#           characteristics needs the detector's link free, so every protocol
+#           experiment has to stop the collector and start it again; without
+#           this, each one needs a human at a keyboard. See
+#           systemd/unidenr8-collector.sudoers for exactly what it grants.
 #
 # It is idempotent: running it again re-templates the unit, reloads and
 # restarts.  Re-running after a `git pull` + deploy is the supported upgrade.
@@ -28,10 +35,12 @@ UNIT_DEST="/etc/systemd/system/${UNIT_NAME}"
 
 ENABLE=1
 DRY_RUN=0
+USER_CONTROL=0
 for arg in "$@"; do
     case "$arg" in
         --no-enable) ENABLE=0 ;;
         --dry-run)   DRY_RUN=1 ;;
+        --allow-user-control) USER_CONTROL=1 ;;
         -h|--help)   sed -n '2,25p' "$0" | sed 's/^# \?//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
@@ -295,6 +304,36 @@ fi
 # the one where something went wrong. `reset-failed` clears only this unit's
 # counter; it starts nothing and touches nothing else.
 sudo systemctl reset-failed "$UNIT_NAME" 2>/dev/null || true
+
+# ---------------------------------------------------------------------------
+# Optional: let this account control this one unit without a password.
+# ---------------------------------------------------------------------------
+
+if [[ "$USER_CONTROL" == 1 ]]; then
+    say "== granting passwordless control of this unit to $RUN_USER"
+    SUDOERS_SRC="$ROOT/systemd/unidenr8-collector.sudoers"
+    [[ -f "$SUDOERS_SRC" ]] || fail "no sudoers template at $SUDOERS_SRC"
+
+    SUDOERS_TMP="$(mktemp)"
+    trap 'rm -f "$RENDERED" "$SUDOERS_TMP"' EXIT
+    sed "s|%%USER%%|${RUN_USER}|" "$SUDOERS_SRC" > "$SUDOERS_TMP"
+
+    # Validate before installing. A malformed file in /etc/sudoers.d can lock
+    # every account out of sudo on this host, so this is checked with sudo's own
+    # parser and only copied into place if it passes.
+    if ! sudo visudo -c -f "$SUDOERS_TMP" >/dev/null 2>&1; then
+        sudo visudo -c -f "$SUDOERS_TMP" || true
+        fail "the rendered sudoers file did not validate; nothing was installed"
+    fi
+    say "   validated with visudo"
+    sudo install -m 0440 -o root -g root "$SUDOERS_TMP" \
+        /etc/sudoers.d/unidenr8-collector
+    say "   installed /etc/sudoers.d/unidenr8-collector"
+    if sudo -n systemctl is-active unidenr8-collector >/dev/null 2>&1 \
+       || sudo -n true 2>/dev/null; then
+        say "   verified: $RUN_USER can now manage this unit without a password"
+    fi
+fi
 
 # `restart` rather than `start`: idempotent, and it picks up a redeploy.  Any
 # hand-started collector was already stopped in preflight, so the new process

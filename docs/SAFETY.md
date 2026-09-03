@@ -260,6 +260,32 @@ git-ignored directory; they reach a printed terminal only on an explicit
 `history.record_detector_motion`; and `evidence.publish()` refuses any document
 carrying a coordinate. See §3, "Position is now a category of its own".
 
+### One command has been sent to the detector, from outside this package
+
+On 2026-09-03, at the owner's explicit and repeated instruction, a single
+`BTreqUMRK:1` was written to the command characteristic by a **standalone script
+that is not part of this package and is not in this repository**. It created a
+user mark. `docs/EVIDENCE.md` §14 records the result.
+
+This section exists so that fact is not discoverable only from a commit message.
+
+**The invariant below is unchanged and still true.** Nothing in
+`src/uniden_r8/` writes an application value to a vendor characteristic; the AST
+audit still proves it; `selftest` and CI still run that proof. Everything this
+project *installs and runs* remains read-only.
+
+The experiment was deliberately kept outside the package rather than added to
+it, because the ordering matters: nobody had ever sent that command to hardware
+on any model, so establishing that it does anything at all is a different and
+much cheaper question than deciding how a project should expose it. The second
+question is now worth asking; it had not been before.
+
+If the capability is ever brought inside, this project's standard for it is
+already written down and does not change: a single reversible command, an
+explicit confirmation flag, the response characteristic captured for ACK/NAK, a
+mandatory before-and-after readback, and a written rationale here. Not a feature
+flag.
+
 The bounded `live` command itself remains a one-shot diagnostic. The separate
 collector below is the only continuous path. Its unit is installed by
 `scripts/install-service.sh`, which needs `sudo` for exactly three things —

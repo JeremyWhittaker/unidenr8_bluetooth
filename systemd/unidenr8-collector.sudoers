@@ -1,0 +1,40 @@
+# Let the owning account start and stop the collector without a password.
+#
+# Installed by `scripts/install-service.sh --allow-user-control` to
+# /etc/sudoers.d/unidenr8-collector, mode 0440.
+#
+# WHY THIS EXISTS
+#
+# Reading the POI or settings characteristics requires the detector's link to be
+# free, because only one BLE central may hold it at a time -- so every
+# `inspect`, every survey and every protocol experiment has to stop the
+# collector first and start it again afterwards. Without this, each of those is
+# a password prompt, which means a human has to be at a keyboard for work that
+# is otherwise unattended, and it means a collector can be left stopped because
+# the person who stopped it got distracted. A stopped collector is a drive not
+# captured.
+#
+# WHAT IT DOES NOT GRANT
+#
+# Four verbs, on one unit, by absolute path. It is not `NOPASSWD: ALL` and it is
+# not a general systemctl grant:
+#
+#   * it cannot touch `hummer-rfcomm`, `bluetooth`, or the display service --
+#     the vehicle's OBD-II link is somebody else's and nothing here may reach
+#     it;
+#   * it cannot `enable`, `disable`, `mask` or `edit` anything, so it cannot
+#     change what happens at boot;
+#   * it grants no shell, no file access, and no other binary.
+#
+# The account this names already owns the tree, the virtualenv, the detector's
+# Bluetooth bond and the private store. Being able to restart a service it
+# already owns is not an escalation; it is the smallest grant that removes a
+# human from the loop.
+#
+# Both spellings of the unit name are listed because sudoers matches the command
+# line literally, and `systemctl stop unidenr8-collector` does not match a rule
+# written for `unidenr8-collector.service`.
+#
+# Remove it with: sudo rm /etc/sudoers.d/unidenr8-collector
+
+%%USER%% ALL=(root) NOPASSWD: /usr/bin/systemctl start unidenr8-collector, /usr/bin/systemctl stop unidenr8-collector, /usr/bin/systemctl restart unidenr8-collector, /usr/bin/systemctl reset-failed unidenr8-collector, /usr/bin/systemctl start unidenr8-collector.service, /usr/bin/systemctl stop unidenr8-collector.service, /usr/bin/systemctl restart unidenr8-collector.service, /usr/bin/systemctl reset-failed unidenr8-collector.service
