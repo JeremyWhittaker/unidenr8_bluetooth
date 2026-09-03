@@ -54,6 +54,20 @@ fail() { printf 'install-service: %s\n' "$*" >&2; exit 1; }
 
 say "== preflight"
 
+# Refuse to run under sudo.  The unit's `User=` is derived from `id -un`, so
+# running this as root templates `User=root` and installs a collector that runs
+# as root against a venv, a config and a bond that belong to somebody else --
+# silently, reporting success.  The script asks for `sudo` itself, for the three
+# commands that need it and no others; that is the whole design.
+if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+    fail "do not run this with sudo.
+    The unit's User= is taken from whoever runs this, so root would install a
+    collector running as root. Run it as the account that owns the venv and the
+    detector's bond${SUDO_USER:+ (you came in via sudo from '$SUDO_USER')}:
+        ./scripts/install-service.sh
+    It will prompt for sudo itself, for the three commands that need it."
+fi
+
 [[ -f "$TEMPLATE" ]] || fail "no unit template at $TEMPLATE (deploy the tree first)"
 [[ -x "$PYTHON"   ]] || fail "no interpreter at $PYTHON -- create the venv first:
     python3 -m venv $ROOT/.venv && $ROOT/.venv/bin/pip install -e '$ROOT[ble]'"
@@ -130,10 +144,46 @@ say "== selftest"
     $PYTHON -m uniden_r8.cli selftest"
 say "   read-only properties hold"
 
-# A second instance would fight the first for the radio, and the loser is
-# whichever one the vehicle needed.
-if pgrep -f 'uniden_r8.cli collect' >/dev/null 2>&1; then
-    say "   note: a collector is already running by hand; it will be replaced"
+# A hand-started collector holds the single-instance lock, and the service will
+# exit 3 on every start attempt until it lets go.  This used to only *say* the
+# running collector "will be replaced", which was untrue: nothing replaced it,
+# the unit burned its restart limit against a lock it could not take, and the
+# install reported success.  Stop it properly, and only it.
+#
+# The PID list is built from `ps` and filtered rather than with a bare
+# `pgrep -f`, because this script's own process tree can contain the pattern and
+# a self-match here kills the installer mid-install.
+#
+# The unit's own MainPID is excluded too.  Without that, re-running the installer
+# on a healthy node would kill the running service out from under systemd, which
+# with `Restart=always` then races the `systemctl restart` below.  Only
+# collectors that systemd does not own are ours to stop.
+UNIT_PID="$(systemctl show "$UNIT_NAME" -p MainPID --value 2>/dev/null || echo 0)"
+[[ -n "$UNIT_PID" ]] || UNIT_PID=0
+
+collectors_not_owned_by_systemd() {
+    ps -eo pid=,args= | awk -v self="$$" -v unit="$UNIT_PID" \
+        '$1 != self && $1 != unit && /python/ && /uniden_r8\.cli/ && /collect/ {print $1}'
+}
+
+HAND_STARTED="$(collectors_not_owned_by_systemd)"
+still=""
+if [[ -n "$HAND_STARTED" ]]; then
+    say "   stopping a hand-started collector so the service can take the lock"
+    for pid in $HAND_STARTED; do
+        kill "$pid" 2>/dev/null && say "      stopped pid $pid"
+    done
+    # It unsubscribes, ends open tracks, flushes the writer and publishes a
+    # stopped state before exiting; give it room rather than racing it.
+    for _ in $(seq 1 15); do
+        sleep 1
+        still="$(collectors_not_owned_by_systemd)"
+        [[ -z "$still" ]] && break
+    done
+    if [[ -n "$still" ]]; then
+        fail "a collector is still running as pid(s) $still and holds the lock.
+    Stop it and re-run: the service cannot start while it is up."
+    fi
 fi
 
 # The OBD guard is advisory here, not fatal: the collector re-checks it every
@@ -239,9 +289,16 @@ else
     say "   not enabled at boot (--no-enable)"
 fi
 
-# `restart` rather than `start`: idempotent, and it picks up a redeploy.  It
-# also cleanly replaces a hand-started collector, because the new process takes
-# the same single-instance lock.
+# Clear a previous failure before restarting.  Without this, a unit that has
+# already burned `StartLimitBurst` refuses to start and the documented "re-run
+# the installer to upgrade" path fails on exactly the node that needs it most --
+# the one where something went wrong. `reset-failed` clears only this unit's
+# counter; it starts nothing and touches nothing else.
+sudo systemctl reset-failed "$UNIT_NAME" 2>/dev/null || true
+
+# `restart` rather than `start`: idempotent, and it picks up a redeploy.  Any
+# hand-started collector was already stopped in preflight, so the new process
+# can take the single-instance lock.
 sudo systemctl restart "$UNIT_NAME"
 
 # ---------------------------------------------------------------------------

@@ -76,6 +76,31 @@ schema it reads exactly. See [`docs/SCHEMA.md`](docs/SCHEMA.md).
 - A test that only passed on a machine which had never run the tool (`history` resolved the default
   database against the process working directory).
 
+### Fixed after the first real install
+
+The first `install-service.sh` run on the vehicle found three defects in the
+installer itself. All were caught by the service failing loudly rather than by
+it looking healthy, which is what the counter-verification is for.
+
+- **It warned that a hand-started collector "will be replaced" and then replaced
+  nothing.** The old process kept the single-instance lock, the unit exited 3 on
+  every start, and the restart counter climbed toward the limit while the install
+  reported success. It now stops them and waits for them to go, excluding the
+  unit's own MainPID so re-running on a healthy node does not kill the service.
+- **`RestartPreventExitStatus=2 3`.** Exit 2 (unreadable config, or `bleak`
+  missing) and exit 3 (another instance holds the lock) are conditions a restart
+  cannot fix. Retrying into them burned all five starts in about two minutes and
+  left systemd refusing the unit for the rest of the hour — a fixable mistake
+  turning into a dead unit and a lost drive.
+- **Running it with `sudo` silently installed a root service.** `User=` is
+  derived from `id -un`. The script now refuses to run as root and explains
+  which account to use. (Root also could not actually run: the unit's empty
+  `CapabilityBoundingSet` leaves it without `CAP_DAC_READ_SEARCH`, so it cannot
+  read the `0771` source tree and dies with `ModuleNotFoundError`.)
+- The installer now runs `systemctl reset-failed` before restarting, so the
+  documented "re-run to upgrade" path works on the one node that needs it most —
+  the one where something already went wrong.
+
 ### Verified on hardware
 
 Parked with the engine running and the RFCOMM link bound and active: telemetry across several

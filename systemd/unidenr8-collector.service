@@ -57,6 +57,19 @@ ExecStart=/home/jeremy/unidenr8/.venv/bin/python -m uniden_r8.cli collect
 Restart=always
 RestartSec=30
 
+# Two exits a restart cannot fix, and which must therefore not consume the
+# start limit above:
+#
+#   2  the configuration is unreadable, or bleak is not installed
+#   3  another collector already holds the single-instance lock
+#
+# Restarting into either one burns all five starts in a couple of minutes and
+# leaves systemd refusing to start the unit for the rest of the hour -- so a
+# fixable mistake becomes a dead unit, and the next drive is lost to it. This
+# is exactly the failure the bond-wait in `cli.py` removes from the other
+# direction. `systemctl status` shows the exit code either way.
+RestartPreventExitStatus=2 3
+
 # SIGTERM must have time to unsubscribe, release the link, end any open alert
 # track, flush the history writer and publish a stopped state. The collector
 # handles all of that; this gives it room.

@@ -632,6 +632,15 @@ It:
   `active (running)` only means the process has not exited. The script samples
   `state.json`'s `counters.telemetry_packets` and reports whether it moved.
 
+**Run it as yourself, not with `sudo`.** The unit's `User=` is derived from
+whoever runs the script, so `sudo ./scripts/install-service.sh` would install a
+collector running as root against a venv, a config and a bond belonging to
+somebody else. The script refuses to start under `sudo` for that reason, and
+asks for it itself where it is actually needed. (Root also fails in a way worth
+knowing: the unit sets an empty `CapabilityBoundingSet`, so a root-run collector
+has no `CAP_DAC_READ_SEARCH` and cannot read the `0771` source directory — it
+dies with `ModuleNotFoundError`, which is the hardening working.)
+
 **What did not change.** It needs `sudo` for exactly three things — writing one
 unit file, `daemon-reload`, and starting one unit — and it touches no other
 unit. It never restarts, edits, enables or disables `hummer-rfcomm`,
