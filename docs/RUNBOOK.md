@@ -812,6 +812,37 @@ cannot-return cost and collects neither benefit. `uptime -s` after the fact
 confirms it: a boot timestamp long after the vehicle was switched off is step 5
 being resolved by hand.
 
+**The node takes a minute to come back after the access point restarts.**
+Measured on this node, and it is a DHCP timeout rather than anything to do with
+WiFi roaming:
+
+```
+15:35:09  4way_handshake -> completed        <- associated in under a second
+15:35:09  dhcp4: beginning transaction (timeout in 45 seconds)
+15:35:55  activated -> failed (reason 'ip-config-unavailable')
+15:35:57  ... retried, associated again
+15:35:58  Activation: successful
+```
+
+The Pi associates to an access point *faster than that access point can serve
+DHCP*. It asks for a lease, a just-rebooted router or phone hotspot is not
+serving yet, and NetworkManager waits out its **45-second default** before
+tearing the connection down and retrying -- and the retry succeeds immediately.
+
+So the recovery works; it is the timeout that is expensive. `ipv4.dhcp-timeout`
+of `0` on a profile means "use the default", not "no timeout". Setting it to 15
+seconds cuts recovery from about a minute to about half of that:
+
+```bash
+for n in netplan-wlan0-Whittakers Whittakers-HotSpot2.4 Whittakers-HotSpot; do
+    sudo nmcli connection modify "$n" ipv4.dhcp-timeout 15
+done
+```
+
+**Do not read this as the node being down.** It is associated the whole time and
+the collector never stopped: the collector writes to local SQLite and does not
+need a network at all. Only your ability to watch it is interrupted.
+
 **A drive recorded rows but no heading, speed or altitude.** Those three columns
 are written only when `[history] record_detector_motion` is on, and it defaults
 to off. See "A validation drive" in `docs/CONFIGURATION.md`. The default is
