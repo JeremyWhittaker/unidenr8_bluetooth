@@ -1,40 +1,101 @@
 # uniden-r8-ble
 
-**Get live radar-detector data out of a Uniden R8 over Bluetooth LE, on Linux.**
-
-Voltage, GPS fix, heading and altitude at 1 Hz. Radar alerts as `start` / `update` / `end` events
-with duration and peak strength. A local SQLite history you can query. MQTT with Home Assistant
-discovery. A live web dashboard. And **no way to write anything to the detector** — not a disabled
-path, an absent one.
+**Put a Raspberry Pi in your car, wire it to a Uniden R8 radar detector over Bluetooth, and find
+out what the thing actually knows.**
 
 [![CI](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml/badge.svg)](https://github.com/JeremyWhittaker/unidenr8_bluetooth/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
 [![Tests](https://img.shields.io/badge/tests-732-brightgreen.svg)](tests/)
-[![No write path](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
+[![Read-only by default](https://img.shields.io/badge/detector-read--only-important.svg)](docs/SAFETY.md)
 
 ![The bundled dashboard: voltage, detector GPS, link status and packet counts across the top; a live
 Ka alert at eight bars; an event log with each threat's duration](docs/img/dashboard.png)
 
+Uniden doesn't publish a Bluetooth API. Their R/Tach app talks to the detector, and until now the
+only way to learn how was to decompile it and hope.
+
+So we took an R8, a Pi Zero 2 W, and a truck, and worked it out from the wire — **on real hardware,
+with every claim graded by where the evidence came from.**
+
 ---
 
-## Why this exists
+## The good bits
 
-Uniden does not publish its Bluetooth API. Their R/Tach app talks to the detector, and until
-recently the only way to learn how was to decompile it.
+**🛰️ We got GPS coordinates out of it. To 3.8 metres.**
+The detector does *not* broadcast its position — we searched every attribute it exposes, in 40
+encodings, with a positive control. But press its MARK button and it stores a coordinate derived
+from its own fix, and that record reads straight back over Bluetooth. Measured against a reference
+at two locations kilometres apart: **8.0 m and 3.8 m**.
+→ [how that was established](docs/EVIDENCE.md)
 
-This project is a **working integration plus an evidence-graded protocol reference**. Every claim
-about the wire format carries a grade saying where it came from — observed on real hardware, seen on
-a different model, or decompiled from an app and never tested. That distinction is not academic:
-about half of what is "known" about this protocol has never been confirmed against any detector, and
-software that treats a guess as a fact will eventually tell a driver there is no threat when there
-is one.
+**📡 There's a 1 Hz coordinate stream nobody had subscribed to.**
+Enumerating the device's own GATT tree — instead of trusting a catalogue inherited from a different
+model — turned up a characteristic that pushes the nearby saved-point window *once a second*, with
+no command sent. It had been sitting there the whole time, written off in our own code as
+"pointless".
 
-So the parser is deliberately conservative, the unknown fields are carried through raw instead of
-being given invented meanings, and [`docs/PROTOCOL.md`](docs/PROTOCOL.md) tells you exactly which is
-which.
+**⚠️ A lowercase hex argument deletes the wrong saved location.**
+The delete command takes a coordinate in hex. Send it lowercase and the detector doesn't reject it —
+it acts on the mis-parse. We watched it report back a latitude a quarter of a degree from what we
+sent, and a longitude that decoded to `3.5e-37`. Uppercase works perfectly. Nobody had documented
+this, because nobody had sent the command to hardware before.
 
-## What you get
+**📐 Every public source had the record layout wrong. Including ours.**
+Two competing readings of the POI record lengths existed. Rather than pick one, the tool evaluates
+*both* against real bytes and reports which consumes the blob exactly. The first populated POI read
+on any R-series detector settled it — **13 / 12 / 10** — and refuted the reading this project had
+been carrying.
+
+---
+
+## What it does
+
+| | |
+|---|---|
+| 🟢 **Live telemetry at 1 Hz** | Voltage, GPS fix state, 8-point heading, speed, altitude. 2,636 packets on a moving vehicle, **zero decode errors** |
+| 🟢 **Radar alerts as events** | `start` / `update` / `end` with duration and peak strength, not just samples |
+| 🟢 **Local SQLite history** | Every session, queryable, survives a power cut mid-write |
+| 🟢 **Runs unattended** | systemd service, starts with the vehicle, reconnects on its own |
+| 🟢 **Read a drive back** | One command tells you what a trip actually captured |
+| 🟢 **MQTT + Home Assistant** | Auto-discovery, opt-in |
+| 🟢 **Live web dashboard** | Server-sent events, no framework, no build step |
+| 🟢 **Plays nicely with OBD-II** | Shares one Bluetooth radio with a vehicle OBD adapter and yields rather than competes |
+
+And the honest other half — because a project that only lists wins isn't worth trusting:
+
+| | |
+|---|---|
+| 🔴 **No real radar alert has ever been captured.** Every field of an *active* alert is inherited from an R8w, a different product | [details](docs/CAPABILITIES.md) |
+| 🔴 **No live position feed.** Not in telemetry, not anywhere — searched directly, with a control | [details](docs/CAPABILITIES.md) |
+| 🟡 **The settings blocks are 240 opaque bytes** we can read and can't decode | [details](docs/CAPABILITIES.md) |
+| ⚪ **MQTT, the dashboard and the GPS client have never met real hardware** | [details](docs/CAPABILITIES.md) |
+
+**→ [Full capability inventory](docs/CAPABILITIES.md)** — everything that works, everything that
+doesn't, and the evidence for each.
+
+---
+
+## Try it
+
+Any Linux box with BlueZ. A Raspberry Pi is the intended target; a laptop works fine.
+
+```bash
+sudo apt install -y bluetooth bluez python3-venv
+git clone https://github.com/JeremyWhittaker/unidenr8_bluetooth.git
+cd unidenr8_bluetooth
+python3 -m venv .venv && .venv/bin/pip install -e ".[ble]"
+
+.venv/bin/uniden-r8 selftest      # proves the read-only controls; needs no radio
+```
+
+Put the detector into **MENU → BT Pairing**, turn Bluetooth off on any phone that normally connects
+to it, then:
+
+```bash
+.venv/bin/uniden-r8 pair --confirm --then-read   # once
+.venv/bin/uniden-r8 live --seconds 30            # look at it
+```
 
 ```console
 $ uniden-r8 live --seconds 30
@@ -47,146 +108,37 @@ alerts: 0
   clear
 ```
 
-```console
-$ uniden-r8 history encounters
-
-kind       at                        band  direction  duration_s  max_strength  max_raw_signal
-alert_end  2026-09-02T22:41:07.412Z  KA    front      12.480      8             88
-alert_end  2026-09-02T22:41:04.204Z  K     side       4.410       6             71
-```
-
-| Capability | Status |
-|---|---|
-| Discovery, pairing, identity, live telemetry | **Verified on hardware** — 508/508 packets parsed across four runs |
-| Voltage, GPS fix state | **Verified** — the status letter decoded by correlation over a full cold start: `C` is a fix, `D` is not |
-| Detector heading, speed, altitude | **Captured moving** — 2,636 packets, 0 unparsed, all 8 headings. Speed is mph (driver-corroborated); altitude is refuted as metres |
-| Latitude/longitude in the live telemetry | **Not there.** [Measured on this R8, not assumed](docs/EVIDENCE.md) — the field upstream numbering suggests is a compass point. Use `gpsd` for continuous position. |
-| Coordinates *stored* by the detector | **Yes — measured to 8 m and 3.8 m**, at two locations kilometres apart. One press of the detector's own MARK button stores a coordinate it derived from its own fix, and it reads back over BLE with no write path of any kind. [How that was established.](docs/EVIDENCE.md) |
-| Alert `start` / `update` / `end` events, duration, peak strength | **Implemented** |
-| Band, strength, frequency, direction, mute | **Implemented; awaiting a real detection on a non-W R8** |
-| SQLite history, MQTT + Home Assistant, live dashboard, `gpsd` fusion | **Implemented; each opt-in** |
-| Settings / POI inspection | **Read-only, and only on an explicit `--confirm`** |
-| Detector control — mute, marks, settings, firmware | **Absent by design** |
-
-## Quick start
-
-Any BlueZ Linux host. A Raspberry Pi is the intended target; a laptop works fine.
-
-```bash
-sudo apt install -y bluetooth bluez python3-venv
-git clone https://github.com/JeremyWhittaker/unidenr8_bluetooth.git
-cd unidenr8_bluetooth
-python3 -m venv .venv && .venv/bin/pip install -e ".[ble]"
-
-.venv/bin/uniden-r8 selftest      # prove the read-only controls; needs no radio
-```
-
-Put the detector into **MENU → BT Pairing**, turn Bluetooth off on any phone that normally connects
-to it, then:
-
-```bash
-.venv/bin/uniden-r8 pair --confirm --then-read   # once
-.venv/bin/uniden-r8 live --seconds 30            # look at it
-```
-
-Then install it as a service, so it is running the next time you drive:
+Then install it as a service, so it's running next time you drive:
 
 ```bash
 .venv/bin/uniden-r8 config --example > unidenr8.toml   # then edit it
 ./scripts/install-service.sh                           # one sudo prompt
 ```
 
-The installer derives every path from the tree it runs out of, refuses to install if the read-only
-audit does not pass, warns you if history is switched off or the OBD guard names a unit this host
-does not have — and then verifies the result by watching the packet counter move, because
-`active (running)` only means the process has not exited yet.
+The installer derives every path from the tree it runs in, refuses to install if the read-only
+audit fails, warns you if history is switched off — and verifies success by **watching the packet
+counter move**, because `active (running)` only means the process hasn't exited yet.
 
-If your host has no OBD-II adapter — most don't — set `guard = false` under `[obd]` first, or the
-collector will refuse to run and be right to. Full operating procedure is in
-[`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+No OBD-II adapter? Set `guard = false` under `[obd]` first, or the collector will refuse to run and
+be right to. Full procedure in the [runbook](docs/RUNBOOK.md).
 
-> [!IMPORTANT]
-> **Live telemetry is verified on real hardware. Active radar alerts are not.**
-> Every field of an *active* alert is decoded from a protocol documented on an **R8w**, a different
-> product. The only alert packet this project has ever seen from a real non-W R8 is all-clear
-> (`0&0&0&0`). Treat any alert it reports as unvalidated. This is the single biggest gap, and
-> [it is the easiest one to help with](#contributing).
+---
 
-## The coordinate question
+## Why everything here is graded
 
-Worth being precise about, because it is the thing people most often get wrong in both directions.
+Every factual claim in this repository carries a grade: **measured on this detector**, **seen on a
+different model**, **decompiled from an app and never tested**, or **inference**.
 
-**The live telemetry packet carries no latitude or longitude.** That is measured on this detector,
-not inferred from upstream: the four-field GPS sub-group is exactly the width a coordinate pair
-would need, so the fields were read, and the first one is a compass point. There is a tripwire in
-the parser that fires if two adjacent sub-fields ever both look like decimal degrees — if it fires,
-the documentation is what needs correcting, not the tripwire.
+That isn't academic. About half of what's publicly "known" about this protocol has never been
+confirmed against any detector, and software that treats a guess as a fact will eventually tell a
+driver there's no threat when there is one.
 
-**That is not the same as "the detector will not give you a position."** It plainly knows where it
-is; it draws on saved camera locations. Uniden's own app can ask it to save a *user mark* at the
-current location — the command carries no coordinates, so the detector must be filling them in from
-its own fix — and that record is then readable from the POI characteristic. If that works on this
-model, one button press yields one detector-derived coordinate.
+So the parser is deliberately conservative, unknown fields are carried through raw instead of being
+given invented meanings, and [`PROTOCOL.md`](docs/PROTOCOL.md) tells you which is which. When a
+measurement contradicts something we'd written, the write-up says so — [several
+have](docs/EVIDENCE.md).
 
-**That has now been checked, and it works — to eight metres.** On 2026-09-03 a
-populated POI database was read from this detector, the first non-empty POI read
-reported on any R-series unit. One press of the physical MARK button added a
-10-byte type-03 record, and it decodes to a position **8.0 m** from a reference
-fix taken at the same spot — inside the error of the consumer GNSS the reference
-itself came from. Repeated at a second location kilometres away: **3.8 m**.
-
-Nothing was written to the detector. No command, no coordinate, no write of any
-kind: the only traffic was a GATT read. A button on its own keypad did the
-writing, and the result is the vehicle's actual position.
-
-It also settled the record layout by measurement rather than by argument. Two
-competing readings of upstream's numbers were on file; `whole-record` (13/12/10)
-consumed four captures exactly — 23, 36, 73 and 83 bytes — while
-`payload-plus-header` (15/14/12) failed on every one and is refuted. All three
-record types are now observed at their predicted lengths: speed camera 13 B,
-red-light camera 12 B, user mark 10 B.
-
-And it turned up something nobody had documented: the POI characteristic returns
-**whatever the detector currently considers nearby**, re-computed between reads,
-not a stable database that grows by append. Two captures ten minutes apart from a
-stationary vehicle shared no bytes. That means a read is a sample of a moving
-window rather than an export — see [`docs/EVIDENCE.md`](docs/EVIDENCE.md) §13.7,
-because it constrains what any tool built on this can claim.
-
-The design that made that possible is worth stating, because it is the whole
-approach:
-
-- there is still **no POI parser here**, deliberately. A parser that decodes and prints coordinates
-  is a different thing from a tool that reports structure, and its output is where people live.
-- what there *is* is `inspection.evaluate_layouts()`, which runs **every** candidate layout against
-  the bytes and reports which one consumes the blob exactly. The refuted layout is kept, because a
-  tool that can only walk one layout cannot report that the layout is wrong — and the next firmware,
-  or an R8w, may not match.
-- `uniden-r8 poi-diff` compares two captures and will report the distance between a decoded point
-  and a reference fix you supply in a file. It reports metres. It never prints a coordinate.
-
-The experiment is in [`docs/VALIDATION.md`](docs/VALIDATION.md) (V8) and needs no write path: park,
-read the POI blob, press MARK once, read again, diff. Everything stays in the owner-only private
-store.
-
-There is also a stream this project only found by enumerating the device rather than trusting its
-own catalogue: **the POI characteristic notifies at 1 Hz**, pushing the whole nearby window with no
-command sent. A record added by command appears in it within a second and vanishes within a second
-of being deleted — so it is a live view of *saved records near the detector*, not of the vehicle.
-
-What that adds up to, stated exactly ([`docs/EVIDENCE.md`](docs/EVIDENCE.md) §17):
-
-| | |
-|---|---|
-| A 1 Hz feed of the vehicle's own position | **No.** Searched for directly: a mark was created so the detector's own fix was known as exact bytes, then every attribute was searched for it in 40 encodings — with the POI data as a positive control that passed. It appears nowhere else ([§18](docs/EVIDENCE.md)) |
-| Position *samples* on demand, ~10 s each | **Yes** — `BTreqUMRK:1` → read → targeted delete, proven reversible, one flash write per sample |
-| Continuous 1 Hz position | A USB GNSS receiver. `gpsd` support is built and tested |
-
-Three marks made at one parked spot came back 2.5 m apart — consumer GNSS jitter — which is how we
-know each one captures the detector's fix at that instant rather than a cached value.
-
-For the vehicle's own continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss`
-branch that is never merged with the detector's own fields, and it is off by default.
+---
 
 ## How it works
 
@@ -202,80 +154,86 @@ flowchart LR
     GPSD[gpsd] -.->|coordinates, opt-in| TRACK
 ```
 
-Three design decisions are worth knowing before you read the code.
+Three decisions worth knowing before you read the code:
 
-**Notifications are events, not samples.** An earlier version updated a variable in the BLE callback
-and published on a timer, so an alert that began and cleared between two publications reached
-nobody. Now the callback stamps two clocks, takes a sequence number and enqueues; a consumer derives
-the transitions. A gap in the sequence is a *recorded* gap, not a silent one.
+**Notifications are events, not samples.** An earlier version updated a variable and published on a
+timer, so an alert that began and cleared between two publications reached nobody. Now the callback
+stamps two clocks, takes a sequence number and enqueues. A dropped notification is a *recorded* gap,
+not a silent one.
 
-**Track identity is inference, and it says so.** Correlating an alert across snapshots is a guess —
-the protocol's alert-id field reads `00` in every published capture. So the raw snapshots are the
-record, the tracks are a derived view stamped with the matcher's version, and a close call is
-flagged `ambiguous`. Direction is *geometry*, not identity: passing a fixed source walks front →
-side → rear for one source, and an early matcher that keyed on it manufactured a fake end-and-start
-at the most interesting moment of every encounter.
+**Track identity is a guess, and it says so.** The protocol's alert-id field reads `00` in every
+published capture, so correlating an alert across snapshots is inference. The raw snapshots are the
+record; the tracks are a derived view stamped with the matcher's version.
 
-**Nothing slow runs on the event loop.** The same loop carries the BLE subscription, and on BlueZ a
-client that stops draining its D-Bus socket is *disconnected*, not merely delayed. The OBD probe,
-the SQLite writer and the state writes all run on threads, and a watchdog publishes the loop's own
-lag so you can tell when that stops being true. On a Pi Zero 2 W it peaks around 2.6 ms.
+**Nothing slow runs on the event loop.** It carries the BLE subscription, and on BlueZ a client that
+stops draining its D-Bus socket is *disconnected*, not merely delayed. The OBD probe, the SQLite
+writer and the state writes all run on threads, and a watchdog publishes the loop's own lag — on a
+Pi Zero 2 W it peaks around 2.6 ms.
 
-[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the rest.
+[`ARCHITECTURE.md`](docs/ARCHITECTURE.md) has the rest.
+
+---
 
 ## Documentation
 
 | | |
 |---|---|
-| [**HANDOFF**](docs/HANDOFF.md) | Start here if you are picking this up. What is proven, what is not, where to work. |
-| [**PROTOCOL**](docs/PROTOCOL.md) | The wire format, field by field, with an evidence grade on every claim. |
-| [**ARCHITECTURE**](docs/ARCHITECTURE.md) | Module map, data flow, threading model, and why each is shaped that way. |
-| [**SCHEMA**](docs/SCHEMA.md) | The consumer contract: both state documents, event records, MQTT topics, SQLite tables. |
-| [**CONFIGURATION**](docs/CONFIGURATION.md) | Every key, with three worked configurations. |
-| [**RUNBOOK**](docs/RUNBOOK.md) | Operating procedure, firmware check to service install. |
-| [**VALIDATION**](docs/VALIDATION.md) | The hardware test matrix — what is still waiting on a powered-on detector. |
-| [**SAFETY**](docs/SAFETY.md) | The safety and privacy boundary, and what enforces each part. |
-| [**EVIDENCE**](docs/EVIDENCE.md) | Every factual claim with its source and grade. Nothing asserted from memory. |
+| [**CAPABILITIES**](docs/CAPABILITIES.md) | What works, what doesn't, what's untested — start here |
+| [**EVIDENCE**](docs/EVIDENCE.md) | Every claim with its source and grade. Nothing asserted from memory |
+| [**PROTOCOL**](docs/PROTOCOL.md) | The wire format, field by field |
+| [**HANDOFF**](docs/HANDOFF.md) | Picking this up? Read this first |
+| [**ARCHITECTURE**](docs/ARCHITECTURE.md) | Module map, data flow, threading model |
+| [**SCHEMA**](docs/SCHEMA.md) | The consumer contract: state documents, events, MQTT topics, SQLite tables |
+| [**CONFIGURATION**](docs/CONFIGURATION.md) | Every key, with four worked configurations |
+| [**RUNBOOK**](docs/RUNBOOK.md) | Operating procedure, firmware check to service install |
+| [**VALIDATION**](docs/VALIDATION.md) | The hardware test matrix — what's still waiting on a detector |
+| [**SAFETY**](docs/SAFETY.md) | The safety and privacy boundary, and what enforces each part |
+
+---
 
 ## Safety and privacy
 
-**There is no application-characteristic write path.** Nothing writes to the Uniden command
-characteristic; no mute, mute-memory, user-mark, camera-delete or settings command is ever sent.
-That is proved by an AST audit of the package's own source, which runs in `selftest` and in CI, and
-which has a companion test proving it can still fail.
+**The installed package cannot write to the detector.** Nothing in it puts an application value on a
+vendor characteristic — no mute, mark, camera-delete or settings command. That's proved by an AST
+audit of the package's own source, which runs in `selftest` and in CI, and which has a companion
+test proving it can still fail.
 
-This is a radio, so it does transmit: BlueZ scans actively, connecting and reading exchange frames,
-and subscribing writes a standard CCCD descriptor. None of that carries an application command to
-the detector, which is the distinction that actually protects it.
+Commands *have* been sent, from standalone scripts outside the package and at the owner's explicit
+instruction — that's how the coordinate results above exist. [`SAFETY.md`](docs/SAFETY.md) says so
+plainly, rather than leaving it to a commit message.
 
 Bluetooth addresses become salted tokens. Coordinates are refused by the publication gate. Raw
-captures stay in a git-ignored `0700` store, and the documents carrying the detector's own heading,
+captures live in a git-ignored `0700` store, and documents carrying the detector's own heading,
 speed and altitude are `0600` and git-ignored too. A repository test scans every committable file
 for an address-shaped literal, with no exception list.
 
-If you run this alongside a vehicle's OBD-II adapter on a shared Bluetooth controller, the collector
-checks that link before connecting and while connected, and lets go of the detector rather than
-compete with it.
+This is a radio, so it *does* transmit: BlueZ scans actively, and subscribing writes a standard CCCD
+descriptor. None of that carries an application command to the detector — which is the distinction
+that actually protects it.
+
+---
 
 ## Contributing
 
 **The most valuable thing you can send is a capture from your own detector.**
 
-Most of what is documented about *active* alerts comes from a single R8w. If you have an R4, R8, R9
-or any of the "w" variants and you see a real alert, a bug report with the decoded packet and what
-your detector's screen said will upgrade a whole row of the protocol table from inherited to
-observed. There is an [issue template](.github/ISSUE_TEMPLATE/hardware-observation.yml) for exactly
-that — it will also remind you to strip anything that is not protocol.
+Most of what's documented about *active* alerts comes from a single R8w. If you have an R4, R8, R9
+or any "w" variant and you see a real alert, a bug report with the decoded packet and what your
+detector's screen said will upgrade a whole row of the protocol table from inherited to observed.
+There's an [issue template](.github/ISSUE_TEMPLATE/hardware-observation.yml) for exactly that — it
+also reminds you to strip anything that isn't protocol.
 
-Code contributions are welcome too. Read [`docs/HANDOFF.md`](docs/HANDOFF.md) first: it lists the
-invariants that must not break and why. The tests need no hardware, no broker, no `gpsd` and no
-network — every external dependency has an injection seam.
+Code contributions welcome too. Read [`HANDOFF.md`](docs/HANDOFF.md) first: it lists the invariants
+that must not break, and why. The tests need no hardware, no broker, no `gpsd` and no network —
+every external dependency has an injection seam.
 
 ```bash
 .venv/bin/pip install -e ".[ble,dev]"
 .venv/bin/python -m pytest -q
 .venv/bin/ruff check .
 ```
+
+---
 
 ## Credits
 
@@ -285,4 +243,4 @@ verifies what applies to an **R8**, and does not copy the upstream source.
 
 MIT licensed. Not affiliated with or endorsed by Uniden. This is diagnostic software and not a
 substitute for the detector's own display or audible warnings — and nothing here is worth looking at
-while you are driving.
+while you're driving.

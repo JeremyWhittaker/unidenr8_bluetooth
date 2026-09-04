@@ -79,6 +79,9 @@ checklist meant to be used standing at the vehicle.
 
 ## Where to start
 
+0. Read [`CAPABILITIES.md`](CAPABILITIES.md). It is the inventory of what works, what does not,
+   and what has never met hardware, with the evidence for each. Everything below assumes you know
+   which half of this project you are standing in.
 1. Read [`SAFETY.md`](SAFETY.md). It is the shortest path to understanding why the code is shaped
    the way it is, and it names every invariant you must not break.
 2. Run `uniden-r8 plan` and `uniden-r8 selftest`. Neither needs a radio. They will tell you what the

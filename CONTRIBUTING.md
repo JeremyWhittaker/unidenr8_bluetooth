@@ -50,8 +50,10 @@ session, or a passenger, is the whole procedure.
 
 ### Before you start
 
-Read [`docs/HANDOFF.md`](docs/HANDOFF.md). It is short, and it lists the invariants that must not
-break along with the test that enforces each one. The important ones:
+Read [`docs/CAPABILITIES.md`](docs/CAPABILITIES.md) to see what is proven and what is not — it
+will tell you quickly whether the thing you want to change rests on a measurement or on an
+inherited assumption. Then read [`docs/HANDOFF.md`](docs/HANDOFF.md), which is short and lists the
+invariants that must not break along with the test that enforces each one. The important ones:
 
 - **No application-characteristic write path.** Not a disabled one — an absent one. An AST audit of
   the package's own source runs in `selftest` and in CI, and there is a companion test proving that
