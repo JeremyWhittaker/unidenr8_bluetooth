@@ -15,7 +15,7 @@ following, and nothing in it can.
 |---|---|
 | `hummer-rfcomm.service` is never edited, stopped, started, enabled, disabled or reloaded. | The collector runs only `systemctl is-active hummer-rfcomm` as a query. Its own unit has only an `After=` ordering edge to the OBD unit — never `Wants=`, `Requires=`, restart propagation or a mutating command. |
 | `/dev/rfcomm0` is never opened, released, rebound or reconfigured. | Nothing here imports `serial`, `pyserial` or `os.open` on a device node. `/dev/rfcomm0` is `root:dialout`, and this project runs as `jeremy` and never asks for it. |
-| `/etc/default/hummer-rfcomm` is untouched. | Root-owned; this project never runs `sudo` and never writes outside its own tree. |
+| `/etc/default/hummer-rfcomm` is untouched. | Root-owned. Nothing in the *package* runs `sudo` or writes outside its own tree; `scripts/install-service.sh` does escalate, for its own unit only, and never touches this file. |
 | The OBDLink **bond** and its trust state are untouched. | `pairing.py` discovers the existing bond set at run time and refuses every command naming one of them. See §1a. |
 | `/home/jeremy/hummer-obd` and its collector state are untouched. | This project installs to `/home/jeremy/unidenr8`, a separate tree. |
 | The detector is treated as BLE/GATT, never RFCOMM. | The only transport is `bleak`, imported lazily inside one function. There is no SPP path. |
@@ -288,7 +288,7 @@ flag.
 
 The bounded `live` command itself remains a one-shot diagnostic. The separate
 collector below is the only continuous path. Its unit is installed by
-`scripts/install-service.sh`, which needs `sudo` for exactly three things —
+`scripts/install-service.sh`, which escalates for a short, enumerated list —
 writing one unit file, reloading the manager, and starting one unit — and
 touches no other unit. It never restarts, edits, enables or disables
 `hummer-rfcomm`, `bluetooth`, or the display service.
@@ -552,7 +552,15 @@ inspection command" above.
 
 ## 4. Privilege
 
-This project never runs `sudo`.
+**The package never runs `sudo`.** Discovery, pairing, identity, the bounded
+live capture, the collector, `survey` and `poi-diff` all run as an ordinary
+user.
+
+**`scripts/install-service.sh` does**, and it is the only thing here that does.
+On the default path it escalates five times — install the unit file,
+`daemon-reload`, `enable`, `reset-failed`, `restart` — and with
+`--allow-user-control` it also validates and installs one file in
+`/etc/sudoers.d`. Each is named individually below.
 
 The completed discovery, pairing, identity and bounded live capture needed
 none: the user-owned venv/tree and BlueZ D-Bus access were sufficient.

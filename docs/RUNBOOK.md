@@ -641,9 +641,10 @@ knowing: the unit sets an empty `CapabilityBoundingSet`, so a root-run collector
 has no `CAP_DAC_READ_SEARCH` and cannot read the `0771` source directory — it
 dies with `ModuleNotFoundError`, which is the hardening working.)
 
-**What did not change.** It needs `sudo` for exactly three things — writing one
-unit file, `daemon-reload`, and starting one unit — and it touches no other
-unit. It never restarts, edits, enables or disables `hummer-rfcomm`,
+**What did not change.** Every privileged command it runs is on one unit:
+installing the unit file, `daemon-reload`, `enable`, `reset-failed`, `restart`
+— plus, with `--allow-user-control`, validating and installing a single file in
+`/etc/sudoers.d`. It touches no other unit. It never restarts, edits, enables or disables `hummer-rfcomm`,
 `bluetooth`, or the display service: the vehicle's OBD-II link is somebody
 else's, and a script that can restart it is a script that can break a drive.
 The unit still orders itself after `hummer-rfcomm` without `Want`-ing or

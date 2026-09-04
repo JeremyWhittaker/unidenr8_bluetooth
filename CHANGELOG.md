@@ -6,6 +6,86 @@ This project versions its *published documents* rather than itself: `state.json`
 frozen, `state-v2.json` is schema 2, and the SQLite history is schema 3. A consumer should pin the
 schema it reads exactly. See [`docs/SCHEMA.md`](docs/SCHEMA.md).
 
+## 2026-09-03
+
+The day the detector gave up a coordinate.
+
+### The headline
+
+- **A coordinate recovered from the detector, measured to 8.0 m and 3.8 m** at
+  two locations kilometres apart. Pressing MARK stores a position the detector
+  derived from its own fix, and the record reads back over BLE.
+- **`BTreqUMRK:1` works over BLE** — the first demonstration on any R-series
+  detector. Upstream documented the command from a decompiled app and recorded
+  that it had never been sent to hardware.
+- **The add/delete transaction is reversible**, verified byte for byte.
+- **The POI record layout is settled: 13 / 12 / 10**, confirmed at four
+  different blob sizes, refuting the reading this project had been carrying. All
+  three record types now observed.
+- **The first drive**: 2,636 packets in motion, 0 unparsed, all eight compass
+  headings. Speed is mph; altitude is refuted as metres. The GPS status letter
+  decoded by correlation — `C` is a fix, `D` is not.
+
+### Added
+
+- `uniden-r8 survey` — enumerates the device's own GATT tree instead of a
+  catalogue inherited from a different model. Reads no characteristic value.
+  Found 14 characteristics and **no undocumented vendor surface**, plus a 1 Hz
+  coordinate-bearing stream on the POI characteristic that nothing had ever
+  subscribed to.
+- `uniden-r8 poi-diff` and `uniden_r8.poi_diff` — compares two POI captures and
+  reports distances, never coordinates.
+- `scripts/drive-report.sh` — reads a drive back, and flags the silent failure
+  where motion fields were never recorded.
+- `scripts/poi-capture.sh` — one POI read that cannot leave the collector
+  stopped.
+- `scripts/install-service.sh`, `uninstall-service.sh`, and
+  `--allow-user-control` for a narrow passwordless grant on one unit.
+- SQLite history schema 3 with an additive migration.
+- `docs/CAPABILITIES.md` — the works / partial / untested / unavailable
+  inventory, and the README rewritten around it.
+
+### Fixed
+
+- A drive captured nothing because the repository shipped a unit template no
+  script installed and a runbook that said not to enable it.
+- The unit's own sandbox would have blocked the OBD guard: `RestrictAddressFamilies`
+  lacked `AF_BLUETOOTH`, which `rfcomm` needs. Caught before installation.
+- A cold boot could lose a whole drive — bond resolution exited rather than
+  waiting, burning the restart limit.
+- The reconnect backoff ceiling cut from 300 s to 60 s, so a truck starting
+  after a night parked is picked up within a minute.
+- **The alert gate would have discarded the first real detection.** It rejected
+  a whole slot over a band string, direction code or signal value inherited from
+  a different product. Now structural only.
+- `_safe_word` destroyed an active POI warning's text; `_safe_group` keeps it.
+- Retention swept once per process start; now also every six hours.
+- `uninstall-service.sh` refused to uninstall anything, and `install-service.sh`
+  mis-detected a running collector — both the same SIGPIPE-under-`pipefail` bug.
+  There is now a test scanning every shipped script for the pattern.
+- A privacy control that the clock could fail 200 seconds a day.
+- Two flaky tests, one of which reached CI.
+- `poi_diff` selected added records by byte offset, which this project's own
+  evidence says is wrong: the set comes back reordered. Now selected by content.
+- Documentation that claimed the project never runs `sudo` and installs no unit.
+
+### Learned the hard way
+
+- **Hex arguments to the detector must be UPPERCASE.** Lowercase is not
+  rejected — it is mis-parsed and acted on, so a lowercase delete targets a
+  coordinate nobody chose.
+- **Never select a POI record by position.** The set is nearest-first and
+  recomputed as the vehicle moves. A position-based selection deleted the wrong
+  record during this project's own testing.
+- The POI characteristic returns a moving nearby window, not a database, so a
+  full export over BLE is not possible.
+
+### Still not verified
+
+No real radar alert has ever been captured — fifty minutes of driving produced
+nothing to detect, and every active-alert field remains inherited from an R8w.
+MQTT, the dashboard and the `gpsd` client have never met hardware.
+
 ## 2026-09-02 (evening)
 
 ### Added

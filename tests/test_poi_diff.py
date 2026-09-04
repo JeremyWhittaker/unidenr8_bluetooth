@@ -373,3 +373,42 @@ def test_a_broken_reference_file_names_no_value_in_its_error(capsys, tmp_path):
     assert code == 1
     assert "cannot read the reference fix" in err
     assert f"{REFERENCE_LAT:.4f}" not in err
+
+
+def test_a_record_added_at_the_front_does_not_make_the_rest_look_added():
+    """The returned set is reordered, so "added" must be decided by content.
+
+    `docs/EVIDENCE.md` §13.12 measured the detector returning its POI set
+    ordered nearest-first: a record created at the reading's own location sorts
+    FIRST and pushes every existing record along. An offset-based test then
+    reports all of them as new.
+
+    This is not hypothetical. §17.3 records a position-based selection picking
+    the wrong record and deleting it, on real hardware, because of exactly this.
+    """
+    a, b = _user_mark(*_near(0.30)), _user_mark(*_near(0.40))
+    before = a + b
+    after = _user_mark(*_near(0.0)) + a + b        # new record at the FRONT
+
+    result = diff_payloads(before, after)
+
+    assert result.appended_only is False, "the fixture must not be a clean append"
+    assert len(result.records_added) == 1, (
+        "only the genuinely new record is added; the two displaced ones are not"
+    )
+    assert result.records_added[0].offset == 0
+
+
+def test_a_reordered_set_with_no_change_reports_nothing_added():
+    """The same records in a different order are not new records.
+
+    The set is recomputed as the vehicle moves (§13.10), so two reads of an
+    unchanged database can come back in a different order. A tool that called
+    that a change would fire on every read taken while driving.
+    """
+    a, b = _user_mark(*_near(0.30)), _user_mark(*_near(0.40))
+
+    result = diff_payloads(a + b, b + a)
+
+    assert result.changed is True, "the bytes did change"
+    assert result.records_added == [], "but no record is new"

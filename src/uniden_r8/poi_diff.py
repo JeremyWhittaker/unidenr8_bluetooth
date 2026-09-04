@@ -225,6 +225,25 @@ class PoiDiff:
         return "\n".join(lines)
 
 
+def _walk_with_offsets(payload: bytes, table: dict[int, tuple[str, int]]):
+    """Yield ``(offset, record bytes)`` for as far as *table* accounts for the blob."""
+    offset = 0
+    while offset < len(payload):
+        candidate = table.get(payload[offset])
+        if candidate is None:
+            return
+        length = candidate[1]
+        if offset + length > len(payload):
+            return
+        yield offset, payload[offset : offset + length]
+        offset += length
+
+
+def _walk(payload: bytes, table: dict[int, tuple[str, int]]) -> list[bytes]:
+    """Just the records, for membership tests."""
+    return [record for _, record in _walk_with_offsets(payload, table)]
+
+
 def diff_payloads(
     before: bytes,
     after: bytes,
@@ -279,33 +298,36 @@ def diff_payloads(
 
     for verdict in exact:
         table = CANDIDATE_LAYOUTS[verdict["layout"]]
-        offset = 0
-        while offset < len(after):
-            candidate = table.get(after[offset])
-            if candidate is None:
-                break
-            kind, length = candidate
-            if offset + length > len(after):
-                break
-            if offset >= len(before) or result.first_difference is not None and (
-                offset >= result.first_difference
-            ):
-                record = after[offset : offset + length]
-                point = decode_point(record)
-                entry = RecordCandidate(
-                    layout=verdict["layout"],
-                    offset=offset,
-                    type_byte=after[offset],
-                    kind=kind,
-                    length=length,
-                    decodes=point is not None,
+        # Which records are new is decided by CONTENT, never by offset.
+        #
+        # An earlier version tested `offset >= len(before)`, which assumes the
+        # later blob is the earlier one with something appended. It is not:
+        # `docs/EVIDENCE.md` §13.12 measured the returned set coming back
+        # *reordered* -- a record added at the reading's own location sorts
+        # first and pushes everything after it along -- and §13.10 measured the
+        # whole set being recomputed as the vehicle moves. Under either, an
+        # offset test reports records as "added" that were simply displaced.
+        #
+        # §17.3 records what that costs when something acts on the answer: a
+        # position-based selection picked the wrong record and deleted it.
+        earlier = set(_walk(before, table))
+        for offset, record in _walk_with_offsets(after, table):
+            if record in earlier:
+                continue
+            point = decode_point(record)
+            entry = RecordCandidate(
+                layout=verdict["layout"],
+                offset=offset,
+                type_byte=record[0],
+                kind=table[record[0]][0],
+                length=len(record),
+                decodes=point is not None,
+            )
+            if point is not None and reference is not None:
+                entry.metres_from_reference = haversine_metres(
+                    point[0], point[1], reference[0], reference[1]
                 )
-                if point is not None and reference is not None:
-                    entry.metres_from_reference = haversine_metres(
-                        point[0], point[1], reference[0], reference[1]
-                    )
-                result.records_added.append(entry)
-            offset += length
+            result.records_added.append(entry)
 
     if not result.records_added:
         result.notes.append(
