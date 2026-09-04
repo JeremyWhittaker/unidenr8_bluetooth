@@ -1567,3 +1567,84 @@ Not an empty read. So there is a two-byte header or terminator that record
 walking has never had to account for, because every capture so far contained at
 least one record. `evaluate_layouts` would report no layout consuming a 2-byte
 blob exactly, which is correct behaviour for an input that is entirely framing.
+
+---
+
+## 18. Searching every attribute for the live fix
+
+The operator's test, and the strongest evidence this project has on the
+question, because it has a **positive control**.
+
+Every previous negative rested on not having *found* a coordinate. This one
+rests on knowing exactly what to look for: create a mark, so the detector's own
+current fix is known as exact bytes, then search everything else it will give us
+for those bytes.
+
+### 18.1 Method
+
+Forty encodings, because a stored coordinate need not share the POI record's
+byte order:
+
+* float32 big-endian, exact and 3-byte prefix
+* float32 little-endian, exact and prefix
+* float64, both orders, 4-byte prefixes
+* scaled integers at 1e5, 1e6 and 1e7 degrees, both orders
+* ASCII decimal at 3, 4, 5 and 6 places, signed and unsigned
+
+The 3-byte prefixes matter: consumer GNSS jitter moves the low byte of a
+float32 latitude by metres while the top three bytes stay put, so a prefix match
+finds a live value that is *near* the mark without needing it to be identical.
+
+Searched across everything the device exposes:
+
+| Haystack | Size |
+|---|---|
+| Settings 1 (`Data_1`) | 240 B |
+| Settings 2 (`Data_2`) | 240 B |
+| Telemetry (`Data_5`) | 29 notifications, 25–26 B |
+| Alerts (`Data_4`) | 0 notifications (nothing detected) |
+| Command response | 2 notifications |
+| POI (`Data_3`) | 29 notifications — **positive control** |
+
+### 18.2 Result — OBSERVED
+
+```
+positive control OK: 4 hits in the POI data
+     lat f32 BE exact         42057FA8
+     lat f32 BE prefix        42057F
+     lon f32 BE exact         C2DF7DC6
+     lon f32 BE prefix        C2DF7D
+
+NO hits outside the POI data.
+```
+
+The control found the coordinate where it certainly is, so the search works and
+the negatives are worth something. **In no other attribute, in any of the forty
+encodings, does the detector's own position appear.**
+
+Combined with §16.1 — fourteen characteristics, no undocumented vendor surface —
+this is close to the limit of what a black-box search can establish:
+
+* there is no attribute nobody has looked at;
+* the one packet that streams continuously is decoded field by field;
+* both opaque settings blocks have now been searched for a known value;
+* and every notification stream has been searched the same way.
+
+### 18.3 What this still does not rule out
+
+**A moving test.** The vehicle was stationary. A field that only carries
+position while moving — a delta, or something derived from speed and heading —
+would not have shown up. Unlikely, and unmeasured.
+
+**Settings that change slowly.** Both blocks were read once and neither notified
+during the window, so a position that appears in settings only after some
+interval would have been missed.
+
+**An encoding not in the list.** Compressed, XORed, offset-encoded or split
+across non-adjacent bytes would all defeat a substring search. Forty encodings
+covering the usual forms is a serious search, not an exhaustive one.
+
+The honest summary is unchanged in direction and much firmer in degree: the
+detector does not publish its own live position on any attribute this project
+can see. A mark remains a position *sample*, and a USB GNSS receiver remains the
+answer for a continuous fix.

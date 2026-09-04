@@ -178,7 +178,7 @@ What that adds up to, stated exactly ([`docs/EVIDENCE.md`](docs/EVIDENCE.md) §1
 
 | | |
 |---|---|
-| A 1 Hz feed of the vehicle's own position | **No.** The telemetry packet is measured, and the survey shows no attribute for it to hide on |
+| A 1 Hz feed of the vehicle's own position | **No.** Searched for directly: a mark was created so the detector's own fix was known as exact bytes, then every attribute was searched for it in 40 encodings — with the POI data as a positive control that passed. It appears nowhere else ([§18](docs/EVIDENCE.md)) |
 | Position *samples* on demand, ~10 s each | **Yes** — `BTreqUMRK:1` → read → targeted delete, proven reversible, one flash write per sample |
 | Continuous 1 Hz position | A USB GNSS receiver. `gpsd` support is built and tested |
 
