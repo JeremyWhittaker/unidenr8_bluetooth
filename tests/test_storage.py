@@ -1042,3 +1042,86 @@ def test_a_database_from_an_unknown_schema_is_still_refused(tmp_path):
     with pytest.raises(storage.HistoryError, match="schema 99"):
         history.open()
     history.close()
+
+
+def _schema_two(path):
+    """A database as the previous build would have left it.
+
+    The full column list matters: `_create` re-runs the index statements on
+    open, and `telemetry_at` needs the `at` column to exist.
+    """
+    with sqlite3.connect(path) as connection:
+        connection.executescript(
+            """
+            CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+            INSERT INTO meta (key, value) VALUES ('schema', '2');
+            CREATE TABLE telemetry (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id INTEGER, at TEXT, wall_ns INTEGER,
+                monotonic_ns INTEGER, voltage REAL, gps_locked INTEGER,
+                poi_active INTEGER, direction_8 TEXT, speed_mph INTEGER,
+                altitude_ft INTEGER, status_raw TEXT, warning_raw TEXT,
+                scan_raw TEXT
+            );
+            """
+        )
+
+
+def test_a_read_only_open_refuses_to_migrate_rather_than_rewriting_the_file(tmp_path):
+    """`uniden-r8 history` is a query. A query must not rewrite the database.
+
+    `_check_version` calls `_migrate`, which runs ALTER TABLE and updates the
+    schema marker — so a read-only open of an older database silently upgraded
+    it. Verified before the fix: a schema-2 file came back as schema 3 with two
+    new columns after nothing more than being opened to print rows from.
+
+    Refusing is the right failure. Migrating is a decision, and the command
+    whose job is to print rows should not make it for the operator.
+    """
+    path = tmp_path / "history.db"
+    _schema_two(path)
+
+    history = storage.History(path, read_only=True)
+    with pytest.raises(storage.HistoryError, match="read-only open will not migrate"):
+        history.open()
+    history.close()
+
+    # And the file is untouched.
+    with sqlite3.connect(path) as connection:
+        marker = connection.execute(
+            "SELECT value FROM meta WHERE key = 'schema'"
+        ).fetchone()[0]
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(telemetry)")}
+    assert marker == "2"
+    assert "poi_raw" not in columns
+
+
+def test_a_read_write_open_still_migrates(tmp_path):
+    """The companion: refusing on read-only must not disable migration entirely.
+
+    Without this, "read-only refuses" could be satisfied by never migrating at
+    all — which would strand every existing database on the next schema bump,
+    the failure the migration was written to prevent.
+    """
+    path = tmp_path / "history.db"
+    _schema_two(path)
+
+    history = storage.History(path)          # read-write
+    history.open()
+    try:
+        assert history._stored_schema() == storage.SCHEMA_VERSION
+    finally:
+        history.close()
+
+
+def test_stats_reports_the_schema_the_file_carries(tmp_path):
+    """Not the version this build happens to write.
+
+    `stats()` exists to report on a file. Printing the constant compiled into
+    the code told the operator what the software believes rather than what the
+    database says — the wrong way round for that command.
+    """
+    path = tmp_path / "history.db"
+    _populated(path)
+    with storage.open_history(path) as history:
+        assert history.stats()["schema"] == history._stored_schema()

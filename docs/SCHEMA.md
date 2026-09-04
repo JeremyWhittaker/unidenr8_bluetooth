@@ -1332,9 +1332,15 @@ record them. A version not in that list still raises `HistoryError` telling the
 operator to move the old file aside rather than mix rows written under different
 meanings.
 
-The reason a bare refusal was not good enough: it is raised inside the writer
-thread, which records the error and returns, so the collector goes on running,
-goes on publishing a healthy state document, and silently writes nothing. In a
+**A read-only open never migrates.** `uniden-r8 history` is a query, and a query
+must not rewrite the file it is reading — an earlier build did exactly that,
+silently upgrading any older database somebody pointed the command at. Opening
+an older schema read-only now raises and says how to upgrade it deliberately.
+
+The reason a bare refusal was not good enough *on the write path*: it is raised
+inside the writer thread, which records the error and returns, so the collector
+goes on running, goes on publishing a healthy state document, and silently
+writes nothing. In a
 vehicle that means the first upgrade after an install quietly stops capturing
 drives, and nobody notices until they look for a detection that should be there.
 A refusal is the right answer to a change of meaning and the wrong answer to an

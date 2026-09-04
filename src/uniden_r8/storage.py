@@ -410,6 +410,23 @@ class History:
         if row is None:
             raise HistoryError(f"{self.path} has no schema marker")
         if row["value"] != str(SCHEMA_VERSION):
+            if self.read_only:
+                # A read-only open must not rewrite the file, and this one did:
+                # `_migrate` runs ALTER TABLE and updates the schema marker, so
+                # `uniden-r8 history` -- documented as a query that touches
+                # nothing -- silently upgraded any older database somebody
+                # pointed it at.  Verified by opening a schema-2 file read-only
+                # and finding schema 3 and two new columns afterwards.
+                #
+                # Refusing is the right failure. Migrating is a decision, and a
+                # command whose job is to print rows should not make it on the
+                # operator's behalf.
+                raise HistoryError(
+                    f"{self.path} is schema {row['value']}, this build reads "
+                    f"{SCHEMA_VERSION}, and a read-only open will not migrate "
+                    f"it.  Run the collector once against it to upgrade it "
+                    f"deliberately, or copy it aside first."
+                )
             if self._migrate(row["value"]):
                 return
             raise HistoryError(
@@ -671,6 +688,27 @@ class History:
                 )
             connection.execute("COMMIT")
 
+    def _stored_schema(self) -> int | str:
+        """The schema marker this file carries, or ``"?"`` if it has none.
+
+        Returned as an ``int`` whenever it parses as one, so the published shape
+        of ``stats()["schema"]`` is unchanged for every database this build can
+        actually open.  A file carrying something unparseable reports the raw
+        string rather than a guess.
+        """
+        try:
+            row = self.connection.execute(
+                "SELECT value FROM meta WHERE key = 'schema'"
+            ).fetchone()
+        except sqlite3.DatabaseError:
+            return "?"
+        if row is None:
+            return "?"
+        try:
+            return int(row["value"])
+        except (TypeError, ValueError):
+            return row["value"]
+
     def last_prune(self) -> dict[str, Any]:
         """What the most recent sweep did.  Empty before the first one."""
         rows = self.connection.execute(
@@ -704,7 +742,12 @@ class History:
         ).fetchone()
         return {
             "path": str(self.path),
-            "schema": SCHEMA_VERSION,
+            # The version recorded *in this file*, not the one this build
+            # writes.  Printing the build's number told the operator what the
+            # code believes rather than what the database says -- which is
+            # exactly the wrong way round for a command that exists to report
+            # on a file.
+            "schema": self._stored_schema(),
             "size_bytes": self.path.stat().st_size if self.path.exists() else 0,
             "counts": counts,
             "first_alert_at": span["first"],

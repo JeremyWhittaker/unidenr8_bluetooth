@@ -71,7 +71,7 @@ invariants that must not break along with the test that enforces each one. The i
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -e ".[ble,dev]"
-.venv/bin/python -m pytest -q      # 734 tests, no hardware needed
+.venv/bin/python -m pytest -q      # 737 tests, no hardware needed
 .venv/bin/ruff check .
 ```
 
