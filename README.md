@@ -170,10 +170,20 @@ read the POI blob, press MARK once, read again, diff. Everything stays in the ow
 store.
 
 There is also a stream this project only found by enumerating the device rather than trusting its
-own catalogue: **the POI characteristic notifies at 1 Hz**, pushing coordinate records with no
-command sent. Those are the coordinates of nearby *saved points*, not of the vehicle — but it means
-"the detector will not give you position live" was a stronger claim than the evidence supported, and
-[`docs/EVIDENCE.md`](docs/EVIDENCE.md) §16 says so.
+own catalogue: **the POI characteristic notifies at 1 Hz**, pushing the whole nearby window with no
+command sent. A record added by command appears in it within a second and vanishes within a second
+of being deleted — so it is a live view of *saved records near the detector*, not of the vehicle.
+
+What that adds up to, stated exactly ([`docs/EVIDENCE.md`](docs/EVIDENCE.md) §17):
+
+| | |
+|---|---|
+| A 1 Hz feed of the vehicle's own position | **No.** The telemetry packet is measured, and the survey shows no attribute for it to hide on |
+| Position *samples* on demand, ~10 s each | **Yes** — `BTreqUMRK:1` → read → targeted delete, proven reversible, one flash write per sample |
+| Continuous 1 Hz position | A USB GNSS receiver. `gpsd` support is built and tested |
+
+Three marks made at one parked spot came back 2.5 m apart — consumer GNSS jitter — which is how we
+know each one captures the detector's fix at that instant rather than a cached value.
 
 For the vehicle's own continuous position today, use `gpsd`. It lives in a separate `vehicle_gnss`
 branch that is never merged with the detector's own fields, and it is off by default.

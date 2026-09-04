@@ -1488,3 +1488,82 @@ to be.
 
 The measurement that would settle it is a moving subscription to `Data_3`,
 watching whether the distinct-payload count climbs with the route.
+
+---
+
+## 17. What the POI stream actually carries
+
+The operator proposed the test: make a mark, learn its exact bytes, then watch
+the notification stream for those bytes. It is the right experiment and it
+settles §16.4.
+
+### 17.1 The stream is a live view of the nearby window — OBSERVED
+
+```
+blob     : 10 B  ->  20 B  ->  10 B          (baseline, after add, after delete)
+stream   : 10 B  ->  20 B  ->  10 B          payload size tracks the blob exactly
+payloads containing the new record's bytes:  12/12 while it existed
+                                              0/10 after it was deleted
+record set restored to baseline:              true
+```
+
+The POI characteristic pushes the **whole current window** once a second. A
+record created by `BTreqUMRK:1` appears in the stream within a second and
+disappears within a second of being deleted.
+
+So it is a live view of *saved records near the detector*. It is not the
+vehicle's position.
+
+### 17.2 But a mark is a position sample — OBSERVED
+
+Three marks made at the same parked location across roughly an hour:
+
+| Record | Latitude |
+|---|---|
+| `42057FA7` | 33.374660 |
+| `42057FA1` | 33.374638 |
+| `42057FAB` | 33.374683 |
+
+A spread of about 2.5 m — consumer GNSS jitter. Each mark captured the
+detector's fix **at the moment it was made**, not a cached or rounded value.
+
+That, with §15.3's reversible add/delete, gives a position *query*:
+
+```
+BTreqUMRK:1  ->  read  ->  BTreqUMRK:0,<LAT>,<LON>
+```
+
+about ten seconds per cycle, one flash write per sample. **This is the honest
+ceiling of the detector as a position source.** It is not a 1 Hz feed of the
+vehicle's own position, and nothing found so far is. A USB GNSS receiver remains
+the answer for continuous position; this is a protocol result.
+
+### 17.3 The ordering bug this test exposed — and it deleted the wrong record
+
+The first run of this experiment selected the record to delete with
+`marks[-1]`, assuming the newest is last. **§13.12 says the returned set is
+ordered nearest-first**, and a mark made at the current location is the nearest
+thing in it, so it sorts **first**. The corrected run confirms it directly:
+
+```
+the NEW record is at index 0 of 2  (FIRST)
+```
+
+So the first run deleted a *pre-existing* record and left its own test mark
+behind — the exact inversion. Both records happened to be artefacts of earlier
+experiments rather than anything the operator had made by hand, and the leftover
+was removed afterwards, but the failure mode is the one that matters:
+
+**Identify records by set difference against a baseline read, never by position
+in the list.** Position is not stable across reads (§13.12), the set is
+recomputed as the vehicle moves (§13.10), and an offset- or index-keyed
+selection will eventually delete somebody's saved location. Any tool built on
+this must do the baseline read first.
+
+### 17.4 An empty POI window is two bytes, not zero — OBSERVED
+
+After the last test mark was removed, the characteristic returned **2 bytes**.
+Not an empty read. So there is a two-byte header or terminator that record
+walking has never had to account for, because every capture so far contained at
+least one record. `evaluate_layouts` would report no layout consuming a 2-byte
+blob exactly, which is correct behaviour for an input that is entirely framing.
