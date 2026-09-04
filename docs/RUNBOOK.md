@@ -774,6 +774,36 @@ have opposite responses:
 `uptime -s` on the node answers it: a boot timestamp after the drive began means
 it was down for some of it.
 
+**Is the node on battery or on external power?** The cell voltage alone will not
+tell you, but the cell voltage *over time* will. Measured on this node:
+
+```
+uptime : 16 h 42 min
+cell   : 3.744 - 3.853 V, holding, and rising at one point
+throttled = 0x0
+```
+
+A Pi Zero 2 W draws roughly 130 mA and the pack holds about 1200 mAh, so on the
+cell alone it is flat in six to eight hours with the voltage collapsing toward
+the 3.40 V threshold. Seventeen hours at 3.75 V is only possible with external
+power present, and a reading that *rises* means charge current is flowing.
+
+```bash
+journalctl -u hummer-battery --no-pager -o short-iso | grep -E "[0-9]\.[0-9]{3} V" | tail -20
+uptime -p; vcgencmd get_throttled
+```
+
+**If it is on permanent (always-hot) vehicle power**, the return problem below is
+solved and replaced with a different one: roughly **1.2-1.6 Ah per day** of
+parasitic draw, so 8-11 Ah a week. On a typical truck battery that is around
+three weeks of standing before you are at half capacity. Fine for a daily
+driver, a real risk at an airport car park. Ignition-switched power gives the
+same guaranteed-up behaviour without the drain.
+
+Note also that the cell was holding at 3.75-3.85 V rather than a topped-up
+4.2 V, so the *reserve* is partial: if the external feed is cut, expect
+noticeably less runtime than a full pack would give.
+
 **The node did not come back when the vehicle started.** This is a power-path
 problem, not a software one, and it is the single largest threat to unattended
 capture — it has cost two drives.

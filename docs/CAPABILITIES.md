@@ -196,8 +196,17 @@ that actually protects it — see [`SAFETY.md`](SAFETY.md).
 
 The node's power path decides whether anything is captured at all. The PiSugar 2
 (IP5209) **cannot power the Pi back on** after it cuts, so a node that powers
-down stays down until somebody reaches the vehicle. Two drives have been lost to
-this. See [`RUNBOOK.md`](RUNBOOK.md), "Troubleshooting".
+down stays down until somebody reaches the vehicle. Two drives were lost to this.
+
+Since measured on the vehicle: the node ran **16 h 42 min including overnight**
+with the cell holding 3.75 V and rising at one point, which is only possible on
+external power — the pack alone would be flat in six to eight hours. So the
+return problem is currently solved by wiring rather than by software.
+
+That trades it for a parasitic draw of roughly 1.2–1.6 Ah per day if the feed is
+always-hot rather than ignition-switched. Neither is this project's to choose;
+both are in [`RUNBOOK.md`](RUNBOOK.md), "Troubleshooting", with the commands to
+tell which one you have.
 
 **Recorded defects**
 
