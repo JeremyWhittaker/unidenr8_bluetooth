@@ -8,9 +8,11 @@ refuse to connect, when it must let go, and that it can never mutate anything.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import math
 import os
+import threading
 import time
 
 import pytest
@@ -1034,3 +1036,114 @@ def test_the_dashboard_does_not_mix_a_bigint_with_a_number():
     assert "n)" not in INDEX_HTML.split("wall_ns")[1][:40], "BigInt literal"
     assert "1000000n" not in INDEX_HTML
     assert "(e.wall_ns||0)/1e6" in INDEX_HTML
+
+
+# ------------------------------------------------- publish ordering
+
+
+def test_a_stale_publish_ticket_never_lands(tmp_path):
+    """A write carrying an older ticket must be dropped, not applied.
+
+    Without this the state file can walk backwards in time -- see the test
+    below for how a write old enough to matter actually arrives.
+    """
+    target = tmp_path / "state.json"
+    collector._write_atomic(target, "newer\n", 20)
+    collector._write_atomic(target, "older\n", 10)
+    assert target.read_text() == "newer\n"
+    assert not list(tmp_path.glob(".*.tmp")), "the dropped write leaked a temporary"
+
+
+def test_concurrent_writers_leave_a_complete_document_from_the_newest_ticket(tmp_path):
+    """Two writers in one process must not share a temporary file.
+
+    Under the old per-pid temporary name they did, so one writer could rename a
+    file another was still part-way through writing -- which defeats the whole
+    point of writing through a temporary. The payloads here are large enough
+    that an interleaved write would not survive the comparison.
+    """
+    target = tmp_path / "state.json"
+    probe = os.umask(0o022)
+    os.umask(probe)
+
+    payloads = {seq: f"{'x' * 8192}-{seq}\n" for seq in range(1, 17)}
+    threads = [
+        threading.Thread(target=collector._write_atomic, args=(target, body, seq))
+        for seq, body in payloads.items()
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+
+    assert target.read_text() == payloads[16], "an older ticket overwrote the newest"
+    assert not list(tmp_path.glob(".*.tmp")), "a temporary was left behind"
+    assert target.stat().st_mode & 0o777 == FILE_MODE
+
+    after = os.umask(0o022)
+    os.umask(after)
+    assert after == probe, "interleaved writers leaked the temporary umask"
+
+
+def test_a_write_cancelled_mid_flight_cannot_overwrite_a_later_document(tmp_path):
+    """The bug this ordering exists for, reproduced without a sleep race.
+
+    `publish_state_async` hands the write to a thread, and cancelling that
+    await -- which the `wait_for` around a session does on every trial deadline
+    and on shutdown -- does not stop the thread. It finishes and renames
+    whenever it is next scheduled, which can be after the shutdown publish has
+    already written `stopped`.
+
+    The symptom was a state file reading `streaming` forever on a collector
+    that had exited cleanly, which is the one thing this file must never say.
+    """
+    real = collector._write_documents
+    entered, release = threading.Event(), threading.Event()
+    tickets: list[int] = []
+
+    def gated(state_dir, payloads, sequence):
+        tickets.append(sequence)
+        if len(tickets) == 1:
+            entered.set()
+            release.wait(10)
+        real(state_dir, payloads, sequence)
+
+    collector._write_documents = gated
+    try:
+        async def scenario():
+            state_dir = tmp_path / "state"
+            streaming = collector.CollectorState()
+            streaming.status = "streaming"
+            stopped = collector.CollectorState()
+            stopped.status = "stopped"
+
+            first = asyncio.create_task(
+                collector.publish_state_async(state_dir, streaming)
+            )
+            # Wait for the thread rather than guessing a sleep -- but bounded:
+            # `publish_state_async` swallows a failing write, so an unbounded
+            # wait here would hang the suite instead of failing it.
+            deadline = time.monotonic() + 10
+            while not entered.is_set():
+                assert time.monotonic() < deadline, "the write never reached a thread"
+                await asyncio.sleep(0.01)
+            first.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await first
+
+            await collector.publish_state_async(state_dir, stopped)
+            release.set()                    # now let the orphan finish its write
+
+        # `asyncio.run` waits for the default executor, so both writes have
+        # landed by the time this returns.
+        asyncio.run(scenario())
+    finally:
+        collector._write_documents = real
+        release.set()
+
+    assert tickets == sorted(tickets) and len(tickets) == 2
+    doc = _doc(tmp_path)
+    assert doc["collector"]["status"] == "stopped", (
+        "the cancelled write landed after the shutdown document"
+    )
+

@@ -78,11 +78,13 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import itertools
 import json
 import math
 import os
 import random
 import signal
+import threading
 import time
 from collections import deque
 from collections.abc import Callable
@@ -708,22 +710,78 @@ def build_detail_document(
     }
 
 
-def _write_atomic(target: Path, payload: str) -> None:
-    """Write ``0600``, atomically.
+#: Issued when a document is *built*; checked when it is about to land.
+#:
+#: This exists because a state write can outlive the coroutine that asked for
+#: it. :func:`publish_state_async` hands the write to ``asyncio.to_thread``, and
+#: cancelling that await -- which the ``asyncio.wait_for`` around a session does
+#: on every trial deadline, and which shutdown does -- does **not** stop the
+#: worker thread. It keeps running and renames whenever it is next scheduled,
+#: which can be *after* the shutdown publish has already written ``stopped``.
+#:
+#: The visible result was a state file reading ``streaming`` forever on a
+#: collector that had exited cleanly. That is the one lie this file must not
+#: tell: the e-paper display reads it and would report a live detector link that
+#: nothing is holding.
+_SEQUENCE_LOCK: Final[threading.Lock] = threading.Lock()
+_publish_sequence = itertools.count(1)
+
+#: Serialises the write body. Two writers in one process are now an expected
+#: state, and the body is not otherwise thread-safe: ``os.umask`` is
+#: process-global, so interleaved writers can leave the temporary mask
+#: installed permanently.
+_PUBLISH_LOCK: Final[threading.Lock] = threading.Lock()
+
+#: Highest ticket that has landed, per target path. Two entries per state
+#: directory in a collector; one per directory a test uses.
+_last_written: dict[str, int] = {}
+
+
+def _next_publish_sequence() -> int:
+    """Take the next publish ticket.
+
+    Kept on its own lock rather than the write lock, and never held across
+    I/O. The event loop takes a ticket on every heartbeat, so a ticket that
+    could block behind an SD-card write would put the card on the loop -- which
+    is the thing this whole module is arranged to avoid.
+    """
+    with _SEQUENCE_LOCK:
+        return next(_publish_sequence)
+
+
+def _write_atomic(target: Path, payload: str, sequence: int) -> None:
+    """Write ``0600``, atomically, unless a newer document already landed.
 
     Atomic because a display may read at any moment and a half-written file is
     worse than a stale one: ``os.replace`` is atomic within a filesystem, so a
     reader sees either the previous document or the new one, never a partial.
+
+    *sequence* is the ticket from :func:`_next_publish_sequence`. A write
+    carrying an older ticket than the one already on disk is dropped rather than
+    applied; see ``_SEQUENCE_LOCK`` for how one comes to arrive at all.
     """
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.tmp")
-    previous = os.umask(0o077)
+    # The temporary name carries the ticket as well as the pid. The lock below
+    # is what actually serialises two writers today, so this is redundant with
+    # it -- deliberately. Under the old per-pid name a lock narrowed by some
+    # later edit would put two writers back on one temporary file, where one
+    # renames a document the other is still part-way through writing. A unique
+    # name costs nothing and closes that route back to the bug.
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{sequence}.tmp")
     try:
-        try:
-            temporary.write_text(payload, encoding="utf-8")
-        finally:
-            os.umask(previous)
-        os.chmod(temporary, FILE_MODE)
-        os.replace(temporary, target)
+        with _PUBLISH_LOCK:
+            previous = os.umask(0o077)
+            try:
+                temporary.write_text(payload, encoding="utf-8")
+            finally:
+                os.umask(previous)
+            os.chmod(temporary, FILE_MODE)
+            if _last_written.get(str(target), 0) > sequence:
+                # A newer document is already on disk. Landing this one would
+                # walk the file backwards in time.
+                temporary.unlink()
+                return
+            os.replace(temporary, target)
+            _last_written[str(target)] = sequence
     except Exception:
         # Remove the partial file before re-raising.  The caller counts the
         # failure and carries on, so without this the temporary survives -- and
@@ -755,6 +813,10 @@ async def publish_state_async(
     read-only must cost the state file, never the radar data: the collector's
     job is to keep reading the detector.
     """
+    # Taken before the documents are built, so the ticket orders publishes by
+    # the instant they describe -- which is what the guard in `_write_atomic`
+    # needs in order to drop a stale write rather than a merely slow one.
+    sequence = _next_publish_sequence()
     payloads: list[tuple[str, str]] = []
     if detail:
         payloads.append((
@@ -767,17 +829,21 @@ async def publish_state_async(
         json.dumps(build_document(state, now), indent=2, sort_keys=True) + "\n",
     ))
     try:
-        await asyncio.to_thread(_write_documents, Path(state_dir), payloads)
+        await asyncio.to_thread(
+            _write_documents, Path(state_dir), payloads, sequence
+        )
         state.publish_failures = 0
     except Exception:  # noqa: BLE001 - a full card degrades, it does not stop us
         state.publish_failures += 1
 
 
-def _write_documents(state_dir: Path, payloads: list[tuple[str, str]]) -> None:
+def _write_documents(
+    state_dir: Path, payloads: list[tuple[str, str]], sequence: int
+) -> None:
     """The blocking half of :func:`publish_state_async`.  Runs on a thread."""
     _ensure_state_dir(state_dir)
     for name, payload in payloads:
-        _write_atomic(state_dir / name, payload)
+        _write_atomic(state_dir / name, payload, sequence)
 
 
 def _ensure_state_dir(state_dir: Path) -> None:
@@ -812,17 +878,23 @@ def publish_state(
     state_dir = Path(state_dir)
     _ensure_state_dir(state_dir)
 
+    # One ticket for both files: they describe the same instant, and they are
+    # different targets, so they never contend with each other.
+    sequence = _next_publish_sequence()
+
     if detail:
         _write_atomic(
             state_dir / "state-v2.json",
             json.dumps(build_detail_document(state, now), indent=2, sort_keys=True)
             + "\n",
+            sequence,
         )
 
     target = state_dir / "state.json"
     _write_atomic(
         target,
         json.dumps(build_document(state, now), indent=2, sort_keys=True) + "\n",
+        sequence,
     )
     return target
 

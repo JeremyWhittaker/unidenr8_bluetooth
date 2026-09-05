@@ -177,6 +177,7 @@ These are enforced, not promised.
 | `state.json` stays schema 1 | A test pinning its exact key set — a sibling project depends on it |
 | Position-adjacent files are `0600` in a `0700` directory | A test that reads the modes back |
 | Nothing slow on the asyncio event loop | A test, plus a published `health.loop_lag_ms` — on a Pi Zero 2 W it peaks around 2.6 ms |
+| The state file never walks backwards in time | A publish ticket taken when the document is built; a write carrying an older ticket is dropped. Three ablation-tested regression tests |
 | Shell scripts cannot use the SIGPIPE-under-`pipefail` pattern | A scan of every shipped script, with a companion proving it fires |
 
 **This is a radio, so it does transmit.** BlueZ scans actively, connecting and
