@@ -1147,3 +1147,34 @@ def test_a_write_cancelled_mid_flight_cannot_overwrite_a_later_document(tmp_path
         "the cancelled write landed after the shutdown document"
     )
 
+
+def test_startup_sweeps_debris_but_never_an_in_flight_temporary(tmp_path):
+    """A killed process cannot clean up after itself; a live one must not be
+    cleaned up *by* anyone. Age is the only thing separating the two."""
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+    old = state_dir / ".state.json.999.7.tmp"
+    legacy = state_dir / ".state-v2.json.8261.tmp"   # the pre-fix naming, seen on the node
+    live = state_dir / ".state.json.1234.9.tmp"
+    for path in (old, legacy, live):
+        path.write_text("")
+    stale_time = time.time() - collector.TEMP_DEBRIS_SECONDS - 60
+    for path in (old, legacy):
+        os.utime(path, (stale_time, stale_time))
+
+    assert collector.sweep_stale_temporaries(state_dir) == 2
+    assert not old.exists() and not legacy.exists()
+    assert live.exists(), "an in-flight write was deleted out from under a writer"
+
+    # A real document is never mistaken for debris, whatever its age.
+    document = state_dir / "state.json"
+    document.write_text("{}")
+    os.utime(document, (stale_time, stale_time))
+    assert collector.sweep_stale_temporaries(state_dir) == 0
+    assert document.exists()
+
+
+def test_a_missing_state_directory_does_not_fail_the_sweep(tmp_path):
+    """Startup calls this before anything has created the directory."""
+    assert collector.sweep_stale_temporaries(tmp_path / "absent") == 0
+

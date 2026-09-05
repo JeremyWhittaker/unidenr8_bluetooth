@@ -737,6 +737,48 @@ _PUBLISH_LOCK: Final[threading.Lock] = threading.Lock()
 _last_written: dict[str, int] = {}
 
 
+#: A temporary older than this was left by a process that is no longer running.
+#: Generous on purpose: a live write is milliseconds old, so nothing in flight
+#: can be mistaken for debris even on a badly loaded SD card.
+TEMP_DEBRIS_SECONDS: Final[float] = 3600.0
+
+
+def sweep_stale_temporaries(state_dir: Path, now: float | None = None) -> int:
+    """Remove publish temporaries left behind by a process that died mid-write.
+
+    `_write_atomic` unlinks its own temporary when a write fails, but a process
+    that is killed -- SIGKILL, or the power path cutting, which is this node's
+    normal way of stopping -- never gets to. The file then sits in the state
+    directory forever, because nothing else ever looked at it. A deployed node
+    was found carrying a zero-byte one.
+
+    Called once at startup rather than per publish: the debris is always from a
+    previous life, and globbing a directory on an SD card at 1 Hz to find
+    nothing is a cost with no reader.
+
+    Age is what makes this safe. A `publish_state` from the CLI can legitimately
+    be writing while the service starts, and deleting its in-flight temporary
+    would corrupt exactly the write this module exists to protect.
+    """
+    now = time.time() if now is None else now
+    removed = 0
+    try:
+        candidates = list(Path(state_dir).glob(".*.tmp"))
+    except OSError:
+        return 0
+    for stale in candidates:
+        try:
+            if now - stale.stat().st_mtime < TEMP_DEBRIS_SECONDS:
+                continue
+            stale.unlink()
+            removed += 1
+        except OSError:
+            # Racing another sweeper, or a directory we may not write. Neither
+            # is worth failing a startup over.
+            continue
+    return removed
+
+
 def _next_publish_sequence() -> int:
     """Take the next publish ticket.
 
@@ -1503,6 +1545,7 @@ async def run(  # noqa: PLR0913 - the injection seams are the point
 
     settings = config or Config()
     state_dir = Path(state_dir)
+    sweep_stale_temporaries(state_dir)
     if obd_probe is None:
         obd_probe = (
             make_obd_probe(settings.obd.unit, settings.obd.device)
