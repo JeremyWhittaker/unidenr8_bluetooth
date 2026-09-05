@@ -51,11 +51,21 @@ driver read off the detector's own display, recorded before the capture was
 retrieved.
 
 What the capture also produced is a defect nothing else could have found:
-`BAND_TOLERANCE_GHZ["KA"]` is 0.025 GHz, and the detector's own frequency
+`BAND_TOLERANCE_GHZ["KA"]` was 0.025 GHz, and the detector's own frequency
 reading for one physical source jitters by 0.030. So the matcher split a single
-encounter into seven tracks, some under a second long (§19.5). The *snapshots*
-are unaffected — they are stored losslessly and can be re-derived — which is the
-first time that design has been needed.
+encounter into **six** tracks, some under a second long (§19.5).
+
+That is now fixed, and fixed from the measurement rather than from a guess. The
+snapshots were replayed through the tracker at a range of tolerances; the pass
+collapses to one track at 0.035 and above. The tolerance is now **0.050** —
+the measured jitter with room, where the room is safe because the US Ka
+allocations police radar uses sit 700–900 MHz apart, so a 50 MHz window cannot
+bridge two real sources. `TRACKING_ALGORITHM` moved to `cost-greedy-2`
+accordingly, the first time that stamp has changed.
+
+This is what the lossless snapshots were for: the tracks were re-derived from
+stored bytes, and doing so also corrected the track count this document
+originally reported as seven (§19.5.1).
 
 **Still unobserved:** more than one simultaneous threat (every packet carried a
 single active slot), and every mute code except `1`.

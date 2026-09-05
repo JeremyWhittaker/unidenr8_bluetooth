@@ -1742,9 +1742,9 @@ Across the encounter the detector reported **35.478 GHz on 31 events and 35.448
 on 18**, alternating within seconds while direction and strength moved
 continuously — one physical source, not two.
 
-Those readings are **0.030 GHz apart**. `BAND_TOLERANCE_GHZ["KA"]` is **0.025**.
-So the matcher scored them as different signals, and one encounter came back as
-**7 alert_start / 7 alert_end pairs**, several lasting under a second:
+Those readings are **0.030 GHz apart**. `BAND_TOLERANCE_GHZ["KA"]` was **0.025**.
+So the matcher scored them as different signals, and the pass came back as
+several tracks, some lasting under a second:
 
 ```
 alert_end  ... duration 0.508 s, samples 2
@@ -1760,6 +1760,59 @@ snapshots are lossless and correct, and the *derived* view fragments.
 **The snapshots are unaffected.** They are the record; tracks are a derived view
 stamped with the matcher's version, precisely so a matcher improved later can be
 re-run against them. This is the first time that design has been needed.
+
+#### 19.5.1 Re-derived from the snapshots, and a correction
+
+The snapshots were replayed through the tracker at a range of tolerances. Two
+encounters are in the store, and separating them corrects a claim made above
+when this section was first written:
+
+| | packets | duration | frequencies reported | span |
+|---|---|---|---|---|
+| The Ka pass (00:31:13–00:33:15) | 245 | 122.2 s | 35.4780 ×174, 35.4480 ×71 | **0.0300 GHz** |
+| The earlier encounter (§19.6) | 7 | 2.8 s | 35.4700 ×7 | 0 |
+
+| KA tolerance | tracks from the Ka pass |
+|---|---|
+| 0.025 (inherited) | **6** |
+| 0.030 | 6 |
+| 0.035 | 1 |
+| 0.050 (now) | 1 |
+| 0.100 | 1 |
+
+**The correction:** this section first reported "7 alert_start / 7 alert_end
+pairs" for the Ka pass. Seven is the count in `alert_events` for the whole
+session, and one of those belongs to the earlier encounter in §19.6. The Ka pass
+produced **six**. The re-derivation totals 1 + 6 = 7, which matches the database
+exactly — the error was in attributing all seven to one encounter, not in the
+data.
+
+Note that 0.030 still splits the pass: the spread *equals* the tolerance, so the
+comparison excludes it. A tolerance has to exceed the jitter, not merely equal
+it.
+
+#### 19.5.2 What the tolerance was changed to, and why that number
+
+`BAND_TOLERANCE_GHZ["KA"]` is now **0.050**, and `TRACKING_ALGORITHM` is
+`cost-greedy-2` — the stamp exists so a history spanning the change can still be
+interpreted, and this is the first time it has moved.
+
+0.050 is not the measured spread. It is the measured spread with room, and the
+room is affordable for a reason specific to this band: the US Ka allocations
+police radar actually uses — 33.8, 34.7 and 35.5 GHz — sit roughly 700–900 MHz
+apart. A 50 MHz window is more than an order of magnitude too narrow to bridge
+two of them, so the margin cannot merge genuinely different sources. Against
+that, the cost of being too narrow is now measured rather than hypothetical:
+six invented threats from one car.
+
+The other bands were left alone. Nothing has measured them, and widening a
+tolerance on the strength of a different band's jitter would be the same
+mistake — reasoning from one product's numbers to another's — that put 0.025
+here in the first place.
+
+A 39-packet verbatim excerpt of the pass, spanning all five frequency flips, is
+now a test: it must produce one track at the current tolerance and six at
+0.025. The finding is executable, not just described.
 
 ### 19.6 An earlier encounter nobody noticed
 

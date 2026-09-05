@@ -866,7 +866,7 @@ GNSS enabled and `record_coordinates` off:
         "slot": 0,
         "strength_1_to_8": 5
       },
-      "algorithm": "cost-greedy-1",
+      "algorithm": "cost-greedy-2",
       "correlation": "new",
       "kind": "alert_start",
       "material": true,
@@ -979,7 +979,7 @@ Two consequences a consumer must accept:
    process-local, starts at 1 per collector run, and means nothing across
    restarts.
 2. **The derivation can be redone.** Every event carries `algorithm`, currently
-   `"cost-greedy-1"`. It is stored with the event so a history spanning an
+   `"cost-greedy-2"`. It is stored with the event so a history spanning an
    algorithm change can still be read honestly instead of silently averaging two
    different matchers' output. A consumer aggregating encounters across a long
    history should group by `algorithm` or filter to one.
@@ -994,7 +994,7 @@ Two consequences a consumer must accept:
 | `monotonic_ns` | int | Monotonic clock, nanoseconds. Use this for durations and ordering. |
 | `wall_ns` | int | Wall clock, nanoseconds since the Unix epoch. Use this only to say *when*. |
 | `correlation` | string | How the observation was matched. See below. |
-| `algorithm` | string | The matcher that produced this. Currently `cost-greedy-1`. |
+| `algorithm` | string | The matcher that produced this. Currently `cost-greedy-2`. |
 | `material` | bool | Whether a field a driver would care about changed. |
 | `alert` | object | The full decoded slot, in the schema-2 `alerts` shape. |
 
@@ -1071,7 +1071,7 @@ A start:
 
 ```json
 {
-  "algorithm": "cost-greedy-1",
+  "algorithm": "cost-greedy-2",
   "alert": {
     "alert_id_raw": "00",
     "band": "KA",
@@ -1105,7 +1105,7 @@ The matching end, with the five aggregate keys present:
 
 ```json
 {
-  "algorithm": "cost-greedy-1",
+  "algorithm": "cost-greedy-2",
   "alert": {
     "alert_id_raw": "00",
     "band": "KA",
@@ -1398,7 +1398,7 @@ One row per derived transition. This is the table the project exists to fill.
 | `alert_id_raw` | TEXT | Field 1. `00` in every capture on either model. |
 | `receive_mode` | TEXT | Field 8 verbatim. No reading of it is established. |
 | `correlation` | TEXT | `new`, `matched`, `ambiguous`, `timeout`, `closed`. |
-| `algorithm` | TEXT | The matcher that produced the row, e.g. `cost-greedy-1`. Stored so a history spanning an algorithm change can still be read honestly. |
+| `algorithm` | TEXT | The matcher that produced the row, e.g. `cost-greedy-2`. Stored so a history spanning an algorithm change can still be read honestly. |
 | `directions` | TEXT | The bearings walked over the encounter, e.g. `FSR`. **NULL except on `alert_end` rows.** |
 | `material` | INTEGER | 0 or 1. |
 | `duration_s` | REAL | **NULL except on `alert_end` rows.** |

@@ -113,7 +113,7 @@ __all__ = [
 #: Stamped on every derived event and stored with it.  Bump it whenever the
 #: matching changes, so a history containing two algorithms' output can still
 #: be read honestly instead of silently averaging them.
-TRACKING_ALGORITHM: Final[str] = "cost-greedy-1"
+TRACKING_ALGORITHM: Final[str] = "cost-greedy-2"
 
 #: Depth of the ingest queue.  Telemetry arrives at about 1 Hz and alerts a few
 #: times a second, so this is many seconds of headroom for a consumer that is
@@ -125,12 +125,29 @@ DEFAULT_QUEUE_SIZE: Final[int] = 256
 #: per band.  Ka police radar covers 33.4-36.0 GHz and wanders more than K
 #: does, so one global tolerance would either split Ka encounters or merge
 #: adjacent K sources.  Values are in GHz.
+#:
+#: **Ka is the only one of these set from a measurement.**  The first real Ka
+#: encounter (EVIDENCE 19.5) had the detector reporting 35.4780 on 174 snapshots
+#: and 35.4480 on 71, alternating within seconds while direction and strength
+#: moved continuously -- one source passing the vehicle, which the driver
+#: confirmed from the detector's own screen.  That is a spread of 0.0300 GHz,
+#: and the old 0.025 split the pass into six tracks, several under a second.
+#:
+#: 0.050 is not the measured spread.  It is the measured spread with room, and
+#: the room is affordable because the US Ka allocations police radar actually
+#: uses -- 33.8, 34.7 and 35.5 GHz -- sit roughly 700-900 MHz apart.  A 50 MHz
+#: window is an order of magnitude too narrow to bridge two of them, so buying
+#: margin here costs nothing that could merge genuinely different sources.
+#:
+#: The other bands keep their inherited values: nothing has measured them, and
+#: widening a tolerance on the strength of a different band's jitter would be
+#: the same mistake in the other direction.
 BAND_TOLERANCE_GHZ: Final[dict[str, float]] = {
     "X": 0.010,
     "K": 0.010,
     "K POP": 0.010,
-    "KA": 0.025,
-    "KA POP": 0.025,
+    "KA": 0.050,
+    "KA POP": 0.050,
 }
 _DEFAULT_TOLERANCE_GHZ: Final[float] = 0.020
 

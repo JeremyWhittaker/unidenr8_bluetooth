@@ -788,7 +788,7 @@ def test_every_event_is_stamped_with_the_matcher_that_produced_it():
     tracker = AlertTracker()
     started = feed(tracker, snapshot(slot()), seq=1, second=1)[0]
     assert started.algorithm == events.TRACKING_ALGORITHM
-    assert started.as_dict()["algorithm"] == "cost-greedy-1"
+    assert started.as_dict()["algorithm"] == "cost-greedy-2"
 
 
 def test_an_event_carries_the_detailed_alert_not_the_reduced_one():
@@ -905,14 +905,19 @@ def test_match_cost_refuses_a_frequency_outside_the_band_tolerance():
 def test_match_cost_scales_frequency_distance_to_the_band():
     """One global tolerance would split Ka encounters or merge K sources.
 
-    The same 5 MHz step is half of Ka's tolerance and outside K's altogether.
+    The same 5 MHz step sits well inside Ka's tolerance and outside K's
+    altogether. The cost is that step as a fraction of the band's own
+    tolerance, and asserting it that way keeps the test about the scaling law
+    rather than about one tolerance's current value -- which matters now that
+    Ka's has been re-measured against hardware (EVIDENCE 19.5).
     """
     assert events.BAND_TOLERANCE_GHZ["KA"] > events.BAND_TOLERANCE_GHZ["K"]
+    step = 0.005
     ka = match_cost(snapshot(slot(field_5="33.7800"))[0],
                     snapshot(slot(field_5="33.7850"))[0])
     k = match_cost(snapshot(slot(band="K", field_5="24.1000"))[0],
                    snapshot(slot(band="K", field_5="24.1500"))[0])
-    assert ka == pytest.approx(0.2)
+    assert ka == pytest.approx(step / events.BAND_TOLERANCE_GHZ["KA"])
     assert k is None
 
 
@@ -980,3 +985,100 @@ def test_a_track_summarises_the_whole_encounter_not_its_last_reading():
     assert summary["samples"] == 2
     assert summary["duration_s"] == 1.0
     assert summary["ambiguous"] is False
+
+# --------------------------------------- the measured Ka encounter
+
+#: A verbatim 19-second excerpt from the first real Ka encounter this project
+#: captured (EVIDENCE 19.5): one police source passing the vehicle, confirmed
+#: from the detector's own screen by the driver. Milliseconds are relative to
+#: the first packet. These payloads carry a band, a strength and a frequency
+#: and no position of any kind.
+#:
+#: The detector's frequency estimate flips between 35.4780 and 35.4480 five
+#: times across the pass -- 0.0300 GHz apart -- while strength and direction
+#: move continuously, which is what a single source going past looks like.
+KA_PASS = [
+    (    0, "1,00,KA,4,92,35.4780,R,1&0&0&0"),
+    (  488, "1,00,KA,4,91,35.4780,R,1&0&0&0"),
+    (  975, "1,00,KA,4,86,35.4780,R,1&0&0&0"),
+    ( 1481, "1,00,KA,4,89,35.4780,R,1&0&0&0"),
+    ( 1988, "1,00,KA,4,87,35.4480,S,1&0&0&0"),
+    ( 2475, "1,00,KA,4,87,35.4480,S,1&0&0&0"),
+    ( 3000, "1,00,KA,4,97,35.4480,R,1&0&0&0"),
+    ( 3488, "1,00,KA,5,104,35.4480,R,1&0&0&0"),
+    ( 3994, "1,00,KA,5,106,35.4480,R,1&0&0&0"),
+    ( 4481, "1,00,KA,5,97,35.4480,R,1&0&0&0"),
+    ( 4988, "1,00,KA,5,103,35.4480,R,1&0&0&0"),
+    ( 5494, "1,00,KA,5,107,35.4480,R,1&0&0&0"),
+    ( 6000, "1,00,KA,5,93,35.4480,R,1&0&0&0"),
+    ( 6488, "1,00,KA,5,93,35.4480,R,1&0&0&0"),
+    ( 6994, "1,00,KA,5,93,35.4480,R,1&0&0&0"),
+    ( 7500, "1,00,KA,5,95,35.4480,R,1&0&0&0"),
+    ( 8007, "1,00,KA,4,77,35.4480,R,1&0&0&0"),
+    ( 8494, "1,00,KA,3,77,35.4480,S,1&0&0&0"),
+    ( 9000, "1,00,KA,3,78,35.4780,R,1&0&0&0"),
+    ( 9524, "1,00,KA,3,78,35.4780,R,1&0&0&0"),
+    ( 9994, "1,00,KA,3,69,35.4780,R,1&0&0&0"),
+    (10500, "1,00,KA,3,62,35.4780,R,1&0&0&0"),
+    (10988, "1,00,KA,3,62,35.4780,R,1&0&0&0"),
+    (11512, "1,00,KA,3,70,35.4780,R,1&0&0&0"),
+    (12000, "1,00,KA,3,75,35.4480,S,1&0&0&0"),
+    (12509, "1,00,KA,3,81,35.4480,S,1&0&0&0"),
+    (13013, "1,00,KA,3,81,35.4780,R,1&0&0&0"),
+    (13501, "1,00,KA,3,81,35.4780,R,1&0&0&0"),
+    (14007, "1,00,KA,3,81,35.4780,R,1&0&0&0"),
+    (14513, "1,00,KA,3,76,35.4780,R,1&0&0&0"),
+    (15001, "1,00,KA,3,64,35.4780,R,1&0&0&0"),
+    (15507, "1,00,KA,3,64,35.4780,R,1&0&0&0"),
+    (16013, "1,00,KA,3,64,35.4780,R,1&0&0&0"),
+    (16519, "1,00,KA,3,69,35.4780,R,1&0&0&0"),
+    (17007, "1,00,KA,3,69,35.4780,R,1&0&0&0"),
+    (17513, "1,00,KA,4,85,35.4480,R,1&0&0&0"),
+    (18001, "1,00,KA,4,85,35.4480,R,1&0&0&0"),
+    (18526, "1,00,KA,4,90,35.4480,R,1&0&0&0"),
+    (19032, "1,00,KA,4,95,35.4480,R,1&0&0&0"),
+]
+
+
+def _tracks(excerpt, tolerance):
+    """Count tracks started when the excerpt is replayed at *tolerance*."""
+    original = dict(events.BAND_TOLERANCE_GHZ)
+    events.BAND_TOLERANCE_GHZ.update({"KA": tolerance, "KA POP": tolerance})
+    try:
+        tracker = events.AlertTracker()
+        started = 0
+        for seq, (offset_ms, payload) in enumerate(excerpt, start=1):
+            at = offset_ms * 1_000_000
+            for event in tracker.observe(
+                parse_alerts(payload), seq=seq, monotonic_ns=at, wall_ns=at
+            ):
+                if event.kind == events.START:
+                    started += 1
+        return started
+    finally:
+        events.BAND_TOLERANCE_GHZ.clear()
+        events.BAND_TOLERANCE_GHZ.update(original)
+
+
+def test_one_ka_source_passing_produces_one_track():
+    """The encounter that re-measured this tolerance, replayed.
+
+    The driver saw one source. Anything above one track here is the matcher
+    inventing threats out of its own frequency jitter -- which is what it did
+    before EVIDENCE 19.5, and what a consumer counting alerts would have
+    believed.
+    """
+    assert _tracks(KA_PASS, events.BAND_TOLERANCE_GHZ["KA"]) == 1
+
+
+def test_the_old_ka_tolerance_split_that_single_source_six_ways():
+    """The defect, kept executable rather than only described.
+
+    0.025 GHz was inherited from upstream documentation and never measured. It
+    is narrower than this detector's own frequency jitter, so every flip closed
+    a track and opened another.
+    """
+    assert _tracks(KA_PASS, 0.025) == 6
+    assert events.BAND_TOLERANCE_GHZ["KA"] > 0.030, (
+        "the tolerance must exceed the jitter that was actually measured"
+    )
