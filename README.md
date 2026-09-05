@@ -54,7 +54,7 @@ been carrying.
 | | |
 |---|---|
 | 🟢 **Live telemetry at 1 Hz** | Voltage, GPS fix state, 8-point heading, speed, altitude. 2,636 packets on a moving vehicle, **zero decode errors** |
-| 🟢 **Radar alerts as events** | `start` / `update` / `end` with duration and peak strength, not just samples |
+| 🟢 **Radar alerts as events** | `start` / `update` / `end` with duration and peak strength. Proven on a real Ka encounter — strength peaked at 8 bars and direction walked front → side → rear as the vehicle passed |
 | 🟢 **Local SQLite history** | Every session, queryable, survives a power cut mid-write |
 | 🟢 **Runs unattended** | systemd service, starts with the vehicle, reconnects on its own |
 | 🟢 **Read a drive back** | One command tells you what a trip actually captured |
@@ -66,7 +66,7 @@ And the honest other half — because a project that only lists wins isn't worth
 
 | | |
 |---|---|
-| 🔴 **No real radar alert has ever been captured.** Every field of an *active* alert is inherited from an R8w, a different product | [details](docs/CAPABILITIES.md) |
+| 🟢 **A real Ka encounter, captured and confirmed.** 252 packets, 0 rejected. Band, strength 1–8, raw signal, frequency and direction all now **observed** — and the decoded 35.478 GHz matches what the driver read off the detector's own screen | [details](docs/EVIDENCE.md) |
 | 🔴 **No live position feed.** Not in telemetry, not anywhere — searched directly, with a control | [details](docs/CAPABILITIES.md) |
 | 🟡 **The settings blocks are 240 opaque bytes** we can read and can't decode | [details](docs/CAPABILITIES.md) |
 | ⚪ **MQTT, the dashboard and the GPS client have never met real hardware** | [details](docs/CAPABILITIES.md) |

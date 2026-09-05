@@ -1648,3 +1648,125 @@ The honest summary is unchanged in direction and much firmer in degree: the
 detector does not publish its own live position on any attribute this project
 can see. A mark remains a position *sample*, and a USB GNSS receiver remains the
 answer for a continuous fix.
+
+---
+
+## 19. A real Ka encounter — every alert field, observed at last
+
+2026-09-04, 17:31–17:33 local. The vehicle passed a Ka source on a normal
+drive. **252 alert packets, 0 rejected, 0 unrecognised.**
+
+Every field of an active alert had been UPSTREAM since this project began —
+decoded from a protocol documented on an **R8w**, a different product, with the
+only alert packet this R8 had ever produced being all-clear. That is no longer
+true of a single one of them.
+
+### 19.1 The packet
+
+```
+1,00,KA,1,25,35.4700,F,1&0&0&0
+```
+
+Field by field, against what upstream said it would be:
+
+| # | Upstream's reading | Observed | Grade now |
+|---|---|---|---|
+| 0 | active marker, `1` | `1` throughout | **OBSERVED** |
+| 1 | alert id | `00` in all 252 packets | **OBSERVED** — and still useless for identity, exactly as documented |
+| 2 | band | `KA` | **OBSERVED** |
+| 3 | strength, 1–8 | **1 through 8**, the full range | **OBSERVED** |
+| 4 | raw signal | 25–138 | **OBSERVED**, scale still unitless |
+| 5 | frequency in GHz | `35.4700`, `35.4780`, `35.4480` | **OBSERVED** |
+| 6 | direction `F`/`S`/`R` | all three | **OBSERVED** |
+| 7 | mute code | `1` in all 252 | **OBSERVED** for code 1 only |
+| — | four `&`-separated slots | 4, always | **OBSERVED** |
+
+### 19.2 It matches what the driver saw
+
+The operator reported the encounter live, from the detector's own display,
+**before any capture was retrieved** — deliberately, because a decode checked
+against a memory reconstructed after seeing the bytes is not a check. That note
+was written to the private store first.
+
+| Reported | Decoded | |
+|---|---|---|
+| Ka | `KA` | ✅ |
+| 35.478 GHz | `35.4780` | ✅ |
+| rear and side | `R` (66 packets), `S` (32) | ✅ |
+| 17:31 → 17:33 | 00:31–01:01 UTC | ✅ |
+
+The frequency is the one that matters most. Field 5 is a *tagged union* —
+a frequency for radar bands, a gun identifier for laser, neither for the
+photo-radar types — and reading it wrongly would invent a plausible number.
+`35.4780` against a driver-reported `35.478` settles that branch.
+
+### 19.3 The geometry walked, exactly as the tracker assumes
+
+```
+00:32:20  str=7  sig=121  35.4780  F      approaching
+00:32:25  str=8  sig=138  35.4780  F      <- peak, eight bars
+00:32:27  str=6  sig=84   35.4780  F
+00:32:28  str=4  sig=87   35.4780  S      <- passing
+00:32:29  str=4  sig=85   35.4780  R      <- passed
+00:32:30  str=4  sig=84   35.4780  R
+```
+
+Strength climbs to 8 bars at closest approach and falls away as the vehicle
+passes, while direction walks **front → side → rear** over about two seconds.
+
+This is the single case the alert tracker was built around, and the reason
+direction is treated as *geometry rather than identity*: an early version keyed
+track identity on direction and manufactured a spurious end-and-start at exactly
+this moment — the most interesting two seconds of the encounter. The design
+holds.
+
+**No packet carried more than one active slot.** Multi-threat handling remains
+implemented and unobserved.
+
+### 19.4 The parser hardening was not needed here, and that is worth knowing
+
+Zero packets were rejected and zero came back unrecognised. Earlier the same day
+the slot gate was loosened so that an unfamiliar band, direction code or signal
+value marks itself unknown rather than discarding the whole detection — because
+every one of those vocabularies came from a different product and a mismatch
+would have published "clear" during a real Ka threat.
+
+On this detector the R8w's vocabulary was exactly right, so the hardening changed
+nothing. That is a good outcome and not evidence the change was unnecessary: it
+was insurance against a failure whose cost was silence during a real detection,
+bought before the first one arrived.
+
+### 19.5 The finding this capture produced: the frequency reading jitters
+
+Across the encounter the detector reported **35.478 GHz on 31 events and 35.448
+on 18**, alternating within seconds while direction and strength moved
+continuously — one physical source, not two.
+
+Those readings are **0.030 GHz apart**. `BAND_TOLERANCE_GHZ["KA"]` is **0.025**.
+So the matcher scored them as different signals, and one encounter came back as
+**7 alert_start / 7 alert_end pairs**, several lasting under a second:
+
+```
+alert_end  ... duration 0.508 s, samples 2
+alert_end  ... duration 2.512 s, samples 6
+alert_end  ... duration 3.994 s, samples 9
+```
+
+The band tolerance was set from upstream's documentation, never from a
+measurement, and the first measurement says it is too tight. This is exactly the
+class of error that only real hardware reveals: every unit test passes, the
+snapshots are lossless and correct, and the *derived* view fragments.
+
+**The snapshots are unaffected.** They are the record; tracks are a derived view
+stamped with the matcher's version, precisely so a matcher improved later can be
+re-run against them. This is the first time that design has been needed.
+
+### 19.6 An earlier encounter nobody noticed
+
+The database also holds a Ka encounter from **2026-09-04 at 01:16 UTC**
+(18:16 local the previous day) — `1,00,KA,1,25,35.4700,F,1&0&0&0` — captured,
+parsed cleanly, and never mentioned by anybody at the time.
+
+So the collector caught a real detection before its operator thought to look.
+That is the system working as intended, and a reminder that "no alert has been
+captured" was a statement about attention rather than about data.

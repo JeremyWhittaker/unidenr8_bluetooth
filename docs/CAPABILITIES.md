@@ -39,20 +39,26 @@ never rounds the second up to the first.
 | Enumerate every GATT attribute the device exposes | ✅ Works | §16.1 — 14 characteristics, no undocumented vendor surface |
 | Read the settings blocks | 🟡 Partial | §13.4 — 240 B each, read fine; **contents undecoded** |
 | Read the POI database | ✅ Works | §13 — first non-empty POI read reported on any R-series unit |
-| Radar alert events (start / update / end) | ⚪ Untested | Implemented and unit-tested; **no real alert has ever been captured** |
+| Radar alert events (start / update / end) | ✅ Works | §19 — a real Ka encounter, 252 packets, 0 rejected, 0 unrecognised |
+| Every active-alert field: band, strength, raw signal, frequency, direction, mute | ✅ Works | §19.1 — all promoted from UPSTREAM to OBSERVED in one capture |
 
-### The one big gap
+### The gap that closed
 
-**No real radar detection has ever been captured from this detector.** Every
-field of an *active* alert — band, strength, frequency, direction, mute state —
-is decoded from a protocol documented on an **R8w**, a different product. The
-only alert packet this R8 has ever produced is all-clear (`0&0&0&0`), and fifty
-minutes of driving produced nothing to detect (§12.5).
+**A real Ka encounter was captured on 2026-09-04** — 252 packets, none rejected,
+none unrecognised — and every active-alert field moved from UPSTREAM to
+OBSERVED in one go (§19). The decoded frequency, `35.4780`, matches what the
+driver read off the detector's own display, recorded before the capture was
+retrieved.
 
-The parser was hardened for this: it no longer rejects a detection because a band
-string, direction code or signal value differs from the R8w's (§ see
-`telemetry._parse_slot`). But "hardened" is not "verified", and this remains the
-most valuable outstanding work in the project.
+What the capture also produced is a defect nothing else could have found:
+`BAND_TOLERANCE_GHZ["KA"]` is 0.025 GHz, and the detector's own frequency
+reading for one physical source jitters by 0.030. So the matcher split a single
+encounter into seven tracks, some under a second long (§19.5). The *snapshots*
+are unaffected — they are stored losslessly and can be re-derived — which is the
+first time that design has been needed.
+
+**Still unobserved:** more than one simultaneous threat (every packet carried a
+single active slot), and every mute code except `1`.
 
 ---
 
