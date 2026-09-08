@@ -235,6 +235,17 @@ definition "leaves the node reachable" rather than halting. That is a deliberate
 trade — a halted PiSugar 2 node cannot be told anything — and it accepts an
 eventual dirty cut in exchange for never needing a wake path.
 
+**A PiSugar 3 is on order, and the node is staged for it.** The v2.3.2 arm64
+packages are downloaded to the node with their checksums recorded, and
+`scripts/setup-pisugar3.sh` will install them with the model preseeded rather
+than defaulted — the mis-set model being the documented way this silently
+fails. Nothing is installed yet: the script refuses until it sees PiSugar 3 on
+I2C, because `pisugar-server`'s IP5209 driver would otherwise write registers on
+the pack currently keeping the node alive. That refusal is tested against the
+live node. The swap procedure, including the bench test that must pass **before**
+graceful shutdown is enabled, is in [`RUNBOOK.md`](RUNBOOK.md), "Swapping to a
+PiSugar 3".
+
 An earlier reading of this was **wrong, and is corrected here.** The node once
 ran 16 h 42 min including overnight with the cell holding 3.75 V, and that was
 taken as proof of an always-hot external feed, on the reasoning that the pack

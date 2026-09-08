@@ -1017,6 +1017,90 @@ Anything that halts the OS while a PiSugar 2 owns the power path strands the
 node until somebody walks out to the vehicle, and no configuration in this
 repository changes that.
 
+### Swapping to a PiSugar 3
+
+This is the option that makes ignition-on → boot deterministic, because
+PiSugar 3 has a real `toggle_power_restore` hardware event rather than PiSugar
+2's ½ Hz RTC retry alarm.
+
+**Already staged on the node**, so the swap does not need a working network in
+a garage. `~/pisugar3-staging/` holds the v2.3.2 arm64 packages:
+
+```
+pisugar-server_2.3.2-1_arm64.deb    ef35090df731e9d3d867750f219b09e7ce546b7be98e8e8c6af5201b2ecb0abc
+pisugar-poweroff_2.3.2-1_arm64.deb  06155280fc89cca3625469e175bdf80a2aaad3ecda2724b39c8929e34b30d964
+```
+
+Release artifacts from `PiSugar/pisugar-power-manager-rs`, not the
+`curl | bash` installer, so what gets installed is a known and checkable
+quantity.
+
+**Nothing is installed yet, deliberately.** `pisugar-server`'s IP5209 driver
+writes registers on init and disables the chip's own light-load auto-shutdown
+when `auto_power_on` is set. Installing it while the PiSugar 2 is still fitted
+would change the behaviour of the pack currently keeping the node alive.
+`scripts/setup-pisugar3.sh` refuses to run until it sees PiSugar 3 on I2C, and
+that refusal has been tested against the live node.
+
+**1 — Fit the hardware.** Leave the PiSugar's own switch **on** permanently;
+the vehicle must never control it. The ignition-switched feed goes to the
+**PiSugar's** USB input, never to the Pi's own power input — the pack has to
+own the power path for any of this to work.
+
+**2 — Install.** From a workstation:
+
+```bash
+./scripts/setup-pisugar3.sh
+```
+
+It identifies the pack over I2C (`0x57` is PiSugar 3, `0x75` is the PiSugar 2's
+IP5209) and refuses if it finds the wrong one. It then installs with the model
+**preseeded** through `debconf-set-selections` rather than answered by a
+prompt. That matters: `pisugar-poweroff`'s postinst takes the model from
+debconf, and on a non-interactive install the prompt never runs, which is how a
+node ends up sending commands for the wrong PMIC and failing silently. The
+script prints the `--model` that actually landed in `/etc/default/*` so this is
+visible rather than assumed.
+
+**3 — Bench test the wake path. Do not skip this.**
+
+```
+1. sudo systemctl poweroff
+2. Confirm the Pi's LED goes fully dark AND the 5V rail actually drops.
+3. Without touching the PiSugar switch, restore external USB power.
+4. The Pi should boot on its own.
+```
+
+Step 2 is the one that catches the real failure. A halted Pi that is *still
+powered* looks identical to a properly powered-down one, and it will never
+wake — restoring external power changes nothing, because the rail never
+dropped. That is the failure mode behind most "auto power on is broken"
+reports, and with `auto_power_on` set the chip's own light-load shutdown is
+disabled, so `pisugar-poweroff` succeeding is the only thing that drops the
+rail.
+
+**4 — Only then, enable graceful shutdown.** On the node:
+
+```bash
+sudo sed -i 's/--on-low stop-collector/--on-low poweroff/' /etc/default/hummer-battery
+sudo systemctl restart hummer-battery
+```
+
+That file belongs to the sibling hummer-obd project. Until this point the
+watcher is deliberately left on `stop-collector`, which never halts and so
+never needs a wake path.
+
+**What changes once it is done.** Ignition off → the pack carries the node →
+the watcher halts the OS at 3.40 V → `pisugar-poweroff` cuts the rail →
+near-zero standby drain. Ignition on → the rail returns → PiSugar 3 restores
+output → the Pi cold-boots. The parasitic-draw problem and the stranded-node
+problem are both solved, which neither the always-hot nor the ignition-switched
+PiSugar 2 arrangement manages.
+
+**Re-check afterwards** that the discharge slope while parked is no longer the
+thing that decides whether a drive is captured, and that `gnss_fixes` and
+`alert_events` still accumulate across an ignition cycle.
+
 `hummer_obdII/docs/RUNBOOK.md`, "Battery watch and graceful shutdown", carries
 the full analysis and owns the decision. Its conclusion, in short: run from
 ignition-switched vehicle power with a read-only root, keep any pack as a UPS
