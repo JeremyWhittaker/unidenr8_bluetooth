@@ -252,9 +252,11 @@ The cell was logged for 3¼ hours against the vehicle's actual state:
 
 The only interval in which the cell gained charge is the drive. **The feed is
 ignition-switched**, so the node charges while the engine runs and discharges
-whenever it does not — roughly **−0.145 V/h**, which is about two and a half
-hours from a parked 3.77 V to the 3.40 V action threshold, and six to eight
-hours from full. So the "solved by wiring" conclusion above was premature: the
+whenever it does not — and the rate steepens as the cell empties: **−0.145 V/h**
+averaged over the first three hours, **−0.230 V/h** measured later at 3.8 V.
+Six to eight hours from full, but only about **ninety minutes** from a parked
+3.76 V to the 3.40 V action threshold — extrapolating an early slope
+overestimates what is left. So the "solved by wiring" conclusion above was premature: the
 return problem is not solved, it is merely deferred by however long the pack
 lasts.
 

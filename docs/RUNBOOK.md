@@ -928,9 +928,13 @@ only interval in which it gained charge was the drive:
 | 10:18 | 3.966 | −0.242 V/h | parked |
 | 11:47 | 3.769 | −0.145 V/h | parked |
 
-So it charges while the engine runs and discharges whenever it does not, at
-about **−0.145 V/h** — roughly two and a half hours from a parked 3.77 V to the
-3.40 V threshold. An earlier reading of a 17-hour run at 3.75 V had been taken
+So it charges while the engine runs and discharges whenever it does not. The
+rate is **not constant**: −0.145 V/h measured over the first three hours, but
+−0.230 V/h over a later 24-minute window at 3.8 V, which is the ordinary Li-ion
+discharge knee. Estimating remaining runtime from an early slope is therefore
+optimistic — a "two and a half hours to threshold" figure taken at 3.77 V was
+about **ninety minutes** in reality. Re-measure over a recent window rather than
+extrapolating an old one. An earlier reading of a 17-hour run at 3.75 V had been taken
 as proof of an always-hot feed; that inference was reasonable and did not
 survive this measurement.
 
