@@ -479,6 +479,20 @@ hardware: a BU-353S4 produced 535 fixes on a 12-minute drive, all 3D, and
 supplied the reference that finally measured the detector's own speed, altitude
 and heading (`docs/EVIDENCE.md` §20).
 
+**There is a script for all of this**, and it is the recommended route because
+it gets the *ordering* right — see "The ordering matters" below:
+
+```bash
+# From a workstation. HOST comes from the environment or .private/pi-host.txt.
+./scripts/setup-gnss.sh --coordinates
+```
+
+It auto-detects the receiver, makes `gpsd` own it durably, enables it at boot,
+**proves the system `gpsd` actually has the device before** retiring any stopgap
+or moving the collector onto it, then restarts and verifies. It is safe to
+re-run. The manual steps below are what it does, for when you want to do them by
+hand or something has gone sideways.
+
 ```bash
 # On the node, with a USB GNSS receiver plugged in.
 sudo apt update && sudo apt install -y gpsd gpsd-clients
@@ -530,6 +544,14 @@ fix quality `0`, `00` satellites and RMC status `V` while it acquires -- it is
 talking, just not locked. Expect satellites-visible to climb before
 satellites-used does. If satellites *visible* stays at zero for several minutes,
 that is sky view, not patience.
+
+**The ordering matters.** If a stopgap `gpsd` is already serving the receiver
+on a spare port, it *works* — and it holds the serial device. Switching the
+collector onto the system `gpsd` before that one has the device leaves the
+vehicle with no position feed and nothing saying so; the collector keeps running
+and keeps recording radar, just with no position attached. Prove the system
+`gpsd` has the device first, then retire the stopgap.
+`scripts/setup-gnss.sh` refuses to switch when it cannot, and says so.
 
 **No root?** If you cannot edit `/etc/default/gpsd`, a private instance on a
 spare port works with only `dialout`, and the collector can be pointed at it:
