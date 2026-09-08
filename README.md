@@ -41,6 +41,15 @@ it acts on the mis-parse. We watched it report back a latitude a quarter of a de
 sent, and a longitude that decoded to `3.5e-37`. Uppercase works perfectly. Nobody had documented
 this, because nobody had sent the command to hardware before.
 
+**📏 We caught the detector's own speedometer reading 0.85 mph high.**
+Bolt a GPS puck to the same Pi and you can check the detector against something
+it knows nothing about. Its speed field fits the reference with a slope of
+**1.0003** — so the units were right — but with a **+0.85 mph** offset that
+never washes out. Its altitude is feet above sea level, agreeing to a few feet.
+Its eight-point compass lands within half a degree of true on the heading we had
+most of. None of that was measurable before.
+→ [the numbers](docs/EVIDENCE.md)
+
 **📐 Every public source had the record layout wrong. Including ours.**
 Two competing readings of the POI record lengths existed. Rather than pick one, the tool evaluates
 *both* against real bytes and reports which consumes the blob exactly. The first populated POI read
@@ -61,6 +70,7 @@ been carrying.
 | 🟢 **MQTT + Home Assistant** | Auto-discovery, opt-in |
 | 🟢 **Live web dashboard** | Server-sent events, no framework, no build step |
 | 🟢 **Plays nicely with OBD-II** | Shares one Bluetooth radio with a vehicle OBD adapter and yields rather than competes |
+| 🟢 **Adds real GPS, if you want it** | A $30 USB puck gives the vehicle a position feed the detector doesn't have — and it's how we finally *measured* the detector's own speed and altitude |
 
 And the honest other half — because a project that only lists wins isn't worth trusting:
 
@@ -69,7 +79,7 @@ And the honest other half — because a project that only lists wins isn't worth
 | 🟢 **A real Ka encounter, captured and confirmed.** 252 packets, 0 rejected. Band, strength 1–8, raw signal, frequency and direction all now **observed** — and the decoded 35.478 GHz matches what the driver read off the detector's own screen | [details](docs/EVIDENCE.md) |
 | 🔴 **No live position feed.** Not in telemetry, not anywhere — searched directly, with a control | [details](docs/CAPABILITIES.md) |
 | 🟡 **The settings blocks are 240 opaque bytes** we can read and can't decode | [details](docs/CAPABILITIES.md) |
-| ⚪ **MQTT, the dashboard and the GPS client have never met real hardware** | [details](docs/CAPABILITIES.md) |
+| ⚪ **MQTT and the dashboard have never met real hardware** | [details](docs/CAPABILITIES.md) |
 
 **→ [Full capability inventory](docs/CAPABILITIES.md)** — everything that works, everything that
 doesn't, and the evidence for each.

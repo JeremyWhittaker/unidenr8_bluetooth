@@ -32,9 +32,9 @@ never rounds the second up to the first.
 | Live telemetry at ~1 Hz | ✅ Works | §7.2 — measured 0.97–1.02 s |
 | Battery voltage | ✅ Works | §7.4 — 12.0–13.7 V across sessions, tracks engine state |
 | GPS fix state | ✅ Works | §12.1 — the status letter decoded by correlation, not assumption |
-| Detector heading (8-point compass) | ✅ Works | §12 — all eight points observed on one drive |
-| Detector speed | ✅ Works | §12.3 — **mph**, corroborated by the driver against the trip |
-| Detector altitude | 🟡 Partial | §12.2 — **metres refuted** by measurement; feet consistent but not instrumented |
+| Detector heading (8-point compass) | ✅ Works | §20.5 — checked against GNSS true bearing; W within 0.6°, every well-sampled point within ~5° |
+| Detector speed | ✅ Works | §20.3 — **mph**, `det = 1.0003 × gps + 0.851`, 89% within ±2 mph against a GNSS reference |
+| Detector altitude | ✅ Works | §20.4 — **feet above MSL**, agreeing with GNSS to a few feet once the fix matures; metres refuted by +844 ft |
 | Decode 2,636 packets in motion with zero errors | ✅ Works | §12 — 0 unparsed, one 88-second gap |
 | Enumerate every GATT attribute the device exposes | ✅ Works | §16.1 — 14 characteristics, no undocumented vendor surface |
 | Read the settings blocks | 🟡 Partial | §13.4 — 240 B each, read fine; **contents undecoded** |
@@ -106,7 +106,7 @@ non-adjacent encoding would defeat a substring search regardless.
 |---|---|
 | **A position sample on demand** | Create a mark, read it, delete it. ~10 s per cycle, one flash write per sample. Measured to 3.8 m. §13.11, §15.3 |
 | **A 1 Hz stream of nearby saved points** | The POI characteristic notifies once a second with the whole current window. Coordinates of *saved places near you*, not of the vehicle. §16.2, §17.1 |
-| **Continuous vehicle position** | Not from the detector. Use a USB GNSS receiver — `gpsd` support is written and tested, and has never had hardware |
+| **Continuous vehicle position** | Not from the detector. Use a USB GNSS receiver — proven on hardware (§20). Position is stored only if you opt in with `record_coordinates` |
 
 ### What you cannot get
 
@@ -171,7 +171,7 @@ in this project's own testing (§17.3).
 | OBD-II coexistence guard | 🟡 Partial | Proven with the RFCOMM link **idle**; a drive under active polling is still outstanding |
 | MQTT + Home Assistant discovery | ⚪ Untested | Implemented, unit-tested, no broker has ever been attached |
 | Web dashboard over SSE | ⚪ Untested | Implemented, unit-tested, never run against the real feed |
-| `gpsd` client for external coordinates | ⚪ Untested | Implemented, 59 tests, no receiver has ever been attached |
+| `gpsd` client for external coordinates | ✅ Works | §20 — BU-353S4 on a drive; 535 fixes, all 3D. Supplied the reference that validated three detector fields |
 
 ---
 
@@ -201,13 +201,15 @@ that actually protects it — see [`SAFETY.md`](SAFETY.md).
 
 **Hardware validation still outstanding**
 
-1. **A real radar alert.** The single most valuable thing anyone could
-   contribute. An automatic-door opener is a lawful K-band source and takes ten
-   minutes.
+1. **A radar alert since the matcher changed.** `cost-greedy-2` widened the Ka
+   tolerance from a measurement (§19.5.1); no encounter has been captured since.
 2. **A moving repeat of the §18 coordinate search.** Read-only, and it closes the
    last real gap in that result.
 3. **OBD coexistence under active polling**, for one to two hours.
 4. **The settings map** — one physical toggle at a time, diffing 240 opaque bytes.
+5. **A drive with real elevation change.** §20.4 settled altitude's *unit* and
+   *datum* but not its responsiveness: over a 175 ft range the regression slope
+   is confounded by GNSS vertical noise, so no claim is made either way.
 
 **Operational, and not fixable in software**
 

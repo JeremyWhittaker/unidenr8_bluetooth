@@ -1823,3 +1823,157 @@ parsed cleanly, and never mentioned by anybody at the time.
 So the collector caught a real detection before its operator thought to look.
 That is the system working as intended, and a reminder that "no alert has been
 captured" was a statement about attention rather than about data.
+
+---
+
+## 20. A GNSS reference, and the detector's motion fields measured against it
+
+**Grade: OBSERVED.** 2026-09-08, a 12-minute commute. Session 41: 567 telemetry
+rows and 535 GNSS fixes, **every fix mode 3 (3D)**, 4–9 satellites, median 6.
+
+Until this drive the detector's speed, altitude and heading had no reference.
+Speed was "mph, corroborated by the driver against the trip"; altitude had
+metres *refuted* but feet never instrumented; the eight compass points had been
+*seen* but never checked against a true bearing. A USB GNSS receiver supplies
+all three at once, from a source the detector knows nothing about.
+
+### 20.1 Getting the receiver working, which was not the plug-in
+
+The receiver (a BU-353S4, PL2303 bridge, `/dev/ttyUSB0`, 4800 baud NMEA) was
+connected and **nothing was being recorded**. Three separate faults, none of
+which announced itself:
+
+1. **`unidenr8.toml` had no `[gnss]` section.** The client therefore never ran.
+   `gnss_fixes` had been empty for the life of the project, which had always
+   been attributed to "no receiver attached" — true until it wasn't.
+2. **`gpsd` had no device.** `/etc/default/gpsd` carried `DEVICES=""` with
+   `USBAUTO="true"`, which registers a receiver via udev *hotplug*. The receiver
+   was plugged in while `gpsd` was inactive, so nothing ever registered it.
+   `gpsd` was running, answering on 2947, and reporting `devices: NONE`.
+3. **A cold start.** The receiver streamed NMEA immediately but with GGA fix
+   quality `0`, `00` satellites and RMC status `V` — alive, unlocked.
+
+The second is worth keeping: a `gpsd` that accepts connections and returns no
+device looks identical from the client side to a receiver that cannot see the
+sky. Reading `/dev/ttyUSB0` directly — the operator account is in `dialout` —
+separated them in one step, and is the diagnostic to reach for first.
+
+Fix quality then progressed 0 satellites → 12 visible / 4 used (SNR to 28.9
+dB-Hz) → 3D lock, which is an ordinary cold start and not a fault.
+
+### 20.2 Pairing, and the clocks
+
+Telemetry and GNSS both arrive near 1 Hz on independent schedules, so each
+telemetry row is paired with the nearest fix. The offset that minimises speed
+error was searched rather than assumed:
+
+```
+shift -2000 ms  rms 2.90 mph      shift +1000 ms  rms 2.21 mph
+shift -1000 ms  rms 1.92 mph      shift +2000 ms  rms 3.13 mph
+shift     0 ms  rms 1.59 mph      BEST: -250 ms, rms 1.53 mph
+```
+
+−250 ms is small enough to be pairing granularity rather than a real lag, and
+the curve is clean and single-minimum, which is itself evidence the two streams
+describe the same vehicle. **472 of 567** telemetry rows paired within 700 ms.
+
+### 20.3 Speed is mph — now measured, not inferred
+
+405 paired samples at 5 mph or more:
+
+| hypothesis | mean error | median | stdev |
+|---|---|---|---|
+| **mph** | **+0.87 mph** | +0.77 | 1.26 |
+| km/h | −36.13 | −46.12 | 16.88 |
+| knots | +8.83 | +10.54 | 3.84 |
+
+Least squares against the reference:
+
+```
+det_mph = 1.0003 * gps_mph + 0.851        residual stdev 1.26 mph
+```
+
+**A slope of 1.0003.** The unit is mph and is not in doubt. 360 of 405 samples
+(89%) land within ±2 mph. The intercept says the detector reads about
+**0.85 mph high**, consistently — small, systematic, and the kind of deliberate
+bias a speedometer-adjacent display usually carries on purpose.
+
+§12.3 previously rested on the driver's recollection of the trip. It is now a
+regression against an independent instrument.
+
+### 20.4 Altitude is feet above mean sea level — and a correction
+
+The metres reading is refuted by an enormous margin: as metres the detector
+would be wrong by **+844 ft** on average. As feet against the GNSS **MSL**
+figure, over all 472 samples, the mean disagreement is **+1.4 ft**.
+
+That number is tidier than the truth, and the breakdown matters more:
+
+| window | mean (det_ft − MSL_ft) | stdev | mean sats |
+|---|---|---|---|
+| 0–1 min | −34.7 | 19.4 | 6.2 |
+| 1–2 min | −8.3 | 5.4 | 7.2 |
+| 2–11 min | +1.4 … +35.7 | 3.0–10.8 | 5.5–7.0 |
+| 11–13 min | −26.2, −45.2 | 12.2, 1.2 | 4.9–6.0 |
+
+| | n | mean | stdev |
+|---|---|---|---|
+| first 2 minutes | 78 | **−22.2 ft** | — |
+| after 2 minutes | 394 | **+6.1 ft** | 17.5 |
+
+**A correction, recorded because it was reported before it was checked.** During
+the drive, the first 14 paired samples were read live and reported as a
+"consistent −52 to −74 ft bias" of unknown cause. That was an artifact of a
+GNSS fix less than ninety seconds old: vertical accuracy settles later than
+horizontal, and the disagreement collapses as it does. There is no such bias.
+Agreement after the fix matures is a few feet, with scatter consistent with
+consumer GNSS vertical error.
+
+The datum is settled too. This `gpsd` reports `altMSL` 373.31, `altHAE` 345.15
+and `geoidSep` −28.162 m, and the client reads `altMSL` first. Against HAE the
+detector would be off by **+93.8 ft**; against MSL, by feet. The detector
+reports **feet above mean sea level**.
+
+One thing this does *not* establish: the regression slope is 0.699, not 1.0,
+which would suggest the detector damps altitude change. Over a drive whose total
+elevation range is ~175 ft, with GNSS vertical noise of the same order as the
+signal, that is exactly what regression attenuation produces on a real
+relationship. **No claim is made about the detector's altitude responsiveness**
+until a drive with real elevation change tests it.
+
+### 20.5 The eight compass points, checked against a true bearing
+
+Paired samples above 3 m/s (GNSS track is meaningless at rest), circular mean of
+the true bearing observed for each reported point:
+
+| point | n | nominal | observed mean | offset |
+|---|---|---|---|---|
+| N | 14 | 0.0 | 2.9 | +2.9 |
+| NE | 1 | 45.0 | 67.5 | +22.4 |
+| E | 11 | 90.0 | 91.7 | +1.7 |
+| SE | 7 | 135.0 | 121.5 | −13.5 |
+| S | 26 | 180.0 | 185.2 | +5.2 |
+| SW | 7 | 225.0 | 226.8 | +1.8 |
+| W | **329** | 270.0 | 269.4 | **−0.6** |
+| NW | 3 | 315.0 | 326.2 | +11.2 |
+
+Every well-sampled point sits within about 5° of its nominal bearing, and W —
+the commute's heading, and two thirds of the drive — within 0.6°. The mapping in
+`telemetry.py` is correct, and correct against an external bearing rather than
+against itself.
+
+The outliers are all thin samples taken during turns, where the vehicle is
+sweeping through a sector and a single sample can land anywhere inside it. NE's
++22.4° is one sample, and ±22.5° is the sector's own half-width — it is the
+weakest possible evidence, not a contradiction. §12's "all eight points
+observed" stands, and is now "observed and referenced" for five of them.
+
+### 20.6 What this drive did not settle
+
+* **Coordinates were deliberately not recorded.** `record_coordinates` was left
+  `false`, so `gnss_fixes` carries fix quality, speed, course and altitude and
+  **no position** — 0 of 535 rows have a latitude. Every result above was
+  obtained without storing where the vehicle went.
+* **No alert.** One snapshot arrived and it was the idle `0&0&0&0`. The Ka
+  tolerance widened in `cost-greedy-2` still has no post-change encounter.
+* **The `gpsd` setup is not yet durable** — see [`RUNBOOK.md`](RUNBOOK.md).

@@ -248,6 +248,36 @@ V3 whenever it happens.
 
 ### V1 — Moving GPS: heading, speed, altitude, latency, and the tripwire
 
+> **RUN 2026-09-08 — PASSED.** A 12-minute commute with a BU-353S4 on the node:
+> 567 telemetry rows, 535 GNSS fixes, all 3D. Full write-up in
+> [`EVIDENCE.md`](EVIDENCE.md) §20. Against the acceptance criteria below:
+>
+> * **Heading** — every reported point agrees with gpsd's `track_deg` well
+>   inside one 45° sector; W (n=329) is 0.6° off nominal, and every
+>   well-sampled point is within ~5°. Exactly eight values appeared, no ninth.
+> * **Speed — mph confirmed.** `det = 1.0003 × gps_mph + 0.851`, residual
+>   stdev 1.26 mph, 89% within ±2 mph. The km/h reading would be wrong by
+>   −36 mph, so `DetectorGps.speed_mph` is correctly named. The detector reads
+>   **0.85 mph high**, consistently.
+> * **Altitude — feet confirmed**, and the datum is **MSL**: as metres it would
+>   be wrong by +844 ft, and against HAE by +94 ft. Agreement is a few feet
+>   once the fix matures.
+> * **Latency — measured, and it is small.** Cross-correlating the two speed
+>   series gives a best alignment of **−250 ms**, which is within the pairing
+>   granularity of two 1 Hz streams. No appreciable lag is detectable at this
+>   sampling rate; a faster reference would be needed to do better.
+> * **`status_raw` / `gps_locked`** read locked on all 472 paired samples and
+>   agreed with the GNSS 3D fix in 472 of 472. Note the negative case was never
+>   exercised: the detector held a fix for the whole drive, so this confirms
+>   agreement, not the unlocked behaviour.
+> * **The tripwire stayed silent.** Sub-fields 0 and 1 produced no coordinate,
+>   and `record_coordinates` was `false` throughout — 0 of 535 fixes carry a
+>   latitude, so none of the above required storing where the vehicle went.
+>
+> Still open: a drive with real elevation change (§20.4 could not separate the
+> detector's altitude *responsiveness* from GNSS vertical noise over a 175 ft
+> range).
+
 **What it proves.** That the four sub-fields of telemetry field 2 are what
 upstream says they are, in the units upstream says, and how far behind reality
 the detector's own reading is. And, negatively, that sub-fields 0 and 1 are not

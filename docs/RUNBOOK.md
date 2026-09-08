@@ -474,8 +474,10 @@ latitude (`docs/EVIDENCE.md` §10.8). What the detector gives you is a fix
 status, an eight-point heading, a speed and an altitude — useful, and not a
 position.
 
-For latitude and longitude you attach a receiver to the Pi. The client is
-written and tested; there is simply nothing for it to read yet.
+For latitude and longitude you attach a receiver to the Pi. This is proven on
+hardware: a BU-353S4 produced 535 fixes on a 12-minute drive, all 3D, and
+supplied the reference that finally measured the detector's own speed, altitude
+and heading (`docs/EVIDENCE.md` §20).
 
 ```bash
 # On the node, with a USB GNSS receiver plugged in.
@@ -496,6 +498,49 @@ sudo systemctl enable --now gpsd
 cgps -s                                # a fix should appear within a minute or two
 ```
 
+**`DEVICES=""` will bite you.** Debian ships `USBAUTO="true"` with an empty
+`DEVICES`, which registers a receiver through a udev *hotplug* event. Plug the
+receiver in while `gpsd` is not running -- which is the normal case, because the
+unit is socket-activated and idle until a client connects -- and nothing ever
+registers it. `gpsd` then accepts connections on 2947 and serves **no device**,
+which from the client side is indistinguishable from a receiver that cannot see
+the sky. Set `DEVICES` explicitly and restart; do not rely on `USBAUTO`.
+
+Three checks, cheapest first, when no fix appears:
+
+```bash
+lsusb | grep -i "prolific\|u-blox\|globalsat"   # is the bridge even enumerated
+ls -l /dev/ttyUSB* /dev/ttyACM*                  # and did a device node appear
+gpspipe -w -n 5                                  # does gpsd list a device at all
+```
+
+If `gpsd` reports no device, read the receiver directly and skip `gpsd`
+entirely -- the operator account is in `dialout`, so no `sudo` is needed:
+
+```bash
+python3 -c "import serial;p=serial.Serial('/dev/ttyUSB0',4800,timeout=2);
+[print(p.readline().decode('ascii','replace').strip()[:6]) for _ in range(10)]"
+```
+
+Sentences appearing here prove the receiver, the cable and the permissions, and
+narrow the fault to `gpsd` alone. A BU-353S4 runs at **4800 baud**, not 9600.
+
+**A cold start is not a fault.** A receiver with no recent almanac reports GGA
+fix quality `0`, `00` satellites and RMC status `V` while it acquires -- it is
+talking, just not locked. Expect satellites-visible to climb before
+satellites-used does. If satellites *visible* stays at zero for several minutes,
+that is sky view, not patience.
+
+**No root?** If you cannot edit `/etc/default/gpsd`, a private instance on a
+spare port works with only `dialout`, and the collector can be pointed at it:
+
+```bash
+setsid nohup gpsd -n -S 2948 /dev/ttyUSB0 >/tmp/gpsd-user.log 2>&1 </dev/null &
+```
+
+This is a stopgap: it does not survive a reboot. Fix `/etc/default/gpsd`
+properly when you can, and set `[gnss] port` back to 2947.
+
 Then switch it on for the collector:
 
 ```toml
@@ -505,6 +550,11 @@ host = "127.0.0.1"
 port = 2947
 record_coordinates = false     # start here; see below
 ```
+
+**A missing `[gnss]` section is silent.** There is no warning for it: the client
+simply never starts, `gnss_fixes` stays empty, and the state file says nothing
+is wrong -- because from the collector's point of view nothing is. If the table
+is empty, check the section exists before suspecting the receiver.
 
 **Leave `record_coordinates` off to begin with.** With it off the client still
 connects, still reports fix mode, satellite count, speed and course, and still
