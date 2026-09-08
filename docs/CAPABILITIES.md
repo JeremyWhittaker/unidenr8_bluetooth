@@ -173,7 +173,7 @@ in this project's own testing (§17.3).
 | OBD-II coexistence guard | 🟡 Partial | Proven with the RFCOMM link **idle**; a drive under active polling is still outstanding |
 | MQTT + Home Assistant discovery | ⚪ Untested | Implemented, unit-tested, no broker has ever been attached |
 | Web dashboard over SSE | ⚪ Untested | Implemented, unit-tested, never run against the real feed |
-| `gpsd` client for external coordinates | ✅ Works | §20 — BU-353S4 on a drive; 535 fixes, all 3D. Supplied the reference that validated three detector fields |
+| `gpsd` client for external coordinates | ✅ Works | §20 — BU-353S4 on a drive; 535 fixes, all 3D. Supplied the reference that validated three detector fields. §22 measures how much the antenna position matters |
 
 ---
 

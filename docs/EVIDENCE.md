@@ -2080,3 +2080,88 @@ a fixed hazard than plotting where the alert happened to fire, and it needs no
 new capture: the raw text is already stored losslessly in `telemetry.poi_raw`.
 
 Not implemented here. Recorded because the data now supports it.
+
+---
+
+## 22. Where to put the antenna, measured three ways
+
+**Grade: OBSERVED.** 2026-09-08, one drive, one receiver, one sampler running
+throughout. The operator moved the antenna mid-drive and later drove a floor
+underground, which turns a vague question — "is under the dash good enough?" —
+into a controlled experiment with a built-in negative control.
+
+Sampling was once a second: fix mode, satellites seen and used, carrier-to-noise
+of the used satellites, and gpsd's own error estimates. No coordinate was
+recorded by the sampler.
+
+### 22.1 The three conditions
+
+Windows exclude ±60 s around each transition, so the move itself is not counted.
+
+| condition | samples | 3D fix | satellites used | C/N0 median | longest gap |
+|---|---|---|---|---|---|
+| under dash, outdoor | 346 | 78% | 4.0 | 24.5 dB-Hz | **50 s** |
+| on dash, outdoor | 280 | **86%** | 4.0 | 25.1 dB-Hz | **10 s** |
+| on dash, **underground** | 56 | **25%** | 4.0 | **14.7 dB-Hz** | 39 s |
+
+### 22.2 The negative control, and why it matters
+
+Driving a floor underground collapsed the fix rate to 25% and dropped
+carrier-to-noise by **10.4 dB** — roughly eleven times less signal power. That
+is the result physics demands, and it is the reason to believe the two rows
+above it: an instrument that reported a healthy fix under a concrete deck would
+be measuring something other than sky view.
+
+It also corrects a reading taken live. A single sample pulled while underground
+showed `mode 3`, and on its own that looked like the receiver holding a fix it
+could not really have. Across the window it holds one 25% of the time. **One
+sample was not a measurement**, which is the same mistake the earlier POI probe
+made by reporting an empty `SKY` message as "no satellites".
+
+### 22.3 What moving to the dash actually bought
+
+**Continuity, not precision.** The fix rate rose from 78% to 86%, and the worst
+uninterrupted gap fell from **50 seconds to 10**. At road speed a 50-second hole
+is well over a mile with no position attached — for mapping a fixed hazard that
+is the difference between locating it and losing it.
+
+What did *not* change is the number that governs precision: **four satellites in
+every condition**, which is the exact minimum for a 3D fix. Both positions are
+running with no margin, so any single loss drops the fix, and the geometry stays
+poor even when it holds. Moving the puck recovered availability; it did not
+recover margin. Glass and plastic pass GNSS and metal does not, so a position
+with more open sky above it — not merely a higher one — is what would buy the
+fifth through eighth satellite.
+
+### 22.4 The error estimates are not an accuracy measurement
+
+gpsd reported `epx`/`epy` medians of 475/372 m under the dash and 525/452 m on
+it, and it would be easy to write that up as "accuracy got worse on the dash".
+It does not mean that. The values are near-constant within each window and
+identical across two independent tools reading the same stream, which is the
+signature of a coarse quantised estimate rather than a per-fix computation. The
+parked reading earlier the same day was 10.9/27.8 m by the same mechanism.
+
+The honest test is whether the *track* is coherent: derive speed from the
+distance between consecutive fixes and compare it against the receiver's own
+Doppler speed, which is computed independently of position.
+
+| moving only | median disagreement | consecutive fixes >5 m/s apart |
+|---|---|---|
+| under dash | 1.46 m/s (3.3 mph) | 20% |
+| on dash | 1.97 m/s (4.4 mph) | 17% |
+
+A track that agrees to a metre or two per second is not carrying hundreds of
+metres of error, so the `epx` figures overstate it badly. But a fifth of
+consecutive fixes jumping by more than 5 m/s is real position noise, present in
+both mountings, and consistent with a four-satellite solution.
+
+### 22.5 What this does not establish
+
+The two outdoor windows are different stretches of road, so surroundings are
+confounded with mounting position. The continuity difference — 50 s versus 10 s
+of maximum outage — is large enough to survive that; the smaller differences in
+C/N0 and track noise are not, and no claim is made from them.
+
+The underground window is 56 samples, enough to demonstrate the collapse and
+not enough to characterise it.

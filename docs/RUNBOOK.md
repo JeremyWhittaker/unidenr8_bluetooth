@@ -548,29 +548,37 @@ parked car and then loses it under the first overpass. What matters is the
 ./scripts/gnss-quality.sh          # SECS=90 by default
 ```
 
-A measured example, from moving the receiver on this vehicle to a spot with no
-clear view of the sky:
+Measured on this vehicle, one drive, three conditions (`EVIDENCE.md` §22):
 
-| | clear view, in motion | obstructed, parked |
-|---|---|---|
-| 3D fix | 535/535 | 180/180 |
-| satellites **used** | 4–9, median **6** | 4–5, median **5** |
-| epx (east–west) | median 13.3 m | median 10.9 m |
-| epy (north–south) | median 17.3 m | median **27.8 m** |
-| combined 2D | ~21.8 m | ~29.9 m |
+| | 3D fix | satellites used | C/N0 | longest gap |
+|---|---|---|---|---|
+| under the dash | 78% | 4.0 | 24.5 dB-Hz | **50 s** |
+| on the dash | **86%** | 4.0 | 25.1 dB-Hz | **10 s** |
+| on the dash, a floor underground | 25% | 4.0 | 14.7 dB-Hz | 39 s |
 
-Both positions hold a fix, which is exactly why a fix is not the test. The
-obstructed one runs on **five** satellites where the clear one had up to nine —
-one above the floor instead of five. And the error is **lopsided**, 2.6× worse
-north–south than east–west, which is the signature of a partly blocked sky:
-satellites visible in one direction only, as a puck against a pillar or under a
-metal panel produces. Glass and plastic pass GNSS; metal does not.
+Both outdoor positions hold a fix most of the time, which is exactly why "does
+it have a fix" is not the test. What moving to the dash bought is **continuity**:
+the worst uninterrupted outage fell from fifty seconds to ten. At road speed
+fifty seconds is over a mile with no position attached.
 
-The consequence is not a worse number, it is a fragile one. A fix with one spare
-satellite survives a parked car and fails under a bridge or a tree line, and it
-fails *silently* — the collector keeps recording radar and simply attaches no
-position, or a worse one. Re-check with a drive before trusting positions from a
-new mounting spot.
+What it did not buy is margin. **Four satellites in every condition** — the
+exact minimum for a 3D fix — so any single loss drops it, and the geometry stays
+poor even while it holds. Glass and plastic pass GNSS and metal does not, so the
+fix is more open sky above the puck, not merely a higher shelf.
+
+The underground row is the control that makes the other two believable: a floor
+of concrete costs 10.4 dB, about eleven times the signal power, and the fix rate
+collapses. An instrument that reported a healthy fix down there would be
+measuring something other than sky view.
+
+**Do not read gpsd's `epx`/`epy` as accuracy here.** They came back near-constant
+within each window and identical across two independent readers, which is a
+quantised estimate rather than a per-fix computation — 475 m while the track was
+demonstrably good to a couple of metres per second. The useful test is whether
+the track is coherent: compare position-derived speed against the receiver's own
+Doppler speed, which is computed independently of position. On this drive they
+agreed to 1.5–2.0 m/s, with about a fifth of consecutive fixes jumping more than
+5 m/s apart — real noise, consistent with a four-satellite solution.
 
 **A cold start is not a fault.** A receiver with no recent almanac reports GGA
 fix quality `0`, `00` satellites and RMC status `V` while it acquires -- it is
