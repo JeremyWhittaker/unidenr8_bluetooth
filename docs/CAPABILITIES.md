@@ -68,6 +68,17 @@ This is what the lossless snapshots were for: the tracks were re-derived from
 stored bytes, and doing so also corrected the track count this document
 originally reported as seven (§19.5.1).
 
+A second Ka encounter followed on 2026-09-08 (§23) and matched the operator's
+report on band, direction and time. It does **not** exercise the widened
+tolerance: its frequency was constant to four decimal places across all seven
+packets, so there was no jitter for any tolerance to fail on. The
+`cost-greedy-2` fix remains unexercised in the field.
+
+That encounter carried **no position**, despite coordinate recording having been
+on for hours — the vehicle was a floor underground and the receiver had been
+unable to fix for fourteen minutes. Radar captured perfectly; the map entry
+would not exist. §23.3 has what that means for hazard mapping.
+
 **Still unobserved:** more than one simultaneous threat (every packet carried a
 single active slot), and every mute code except `1`.
 

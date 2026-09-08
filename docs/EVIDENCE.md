@@ -2165,3 +2165,122 @@ C/N0 and track noise are not, and no claim is made from them.
 
 The underground window is 56 samples, enough to demonstrate the collapse and
 not enough to characterise it.
+
+---
+
+## 23. The first Ka encounter under `cost-greedy-2`, and the first with no position
+
+**Grade: OBSERVED.** 2026-09-08. Operator ground truth was recorded in
+`.private/ka-observation-20260908.txt` before the capture was retrieved: *"Front
+ka band at 1300"* — band, direction and time, with frequency, strength and
+duration left as free predictions.
+
+### 23.1 What was captured
+
+Seven snapshots, every one byte-identical:
+
+```
+1,00,KA,1,21,34.8430,F,1&0&0&0
+19:59:39.537 .. 19:59:42.331 UTC   (12:59:39 local)
+7 packets, 0 rejected, 0 unrecognised
+```
+
+| operator said | capture says | |
+|---|---|---|
+| Ka band | `KA` | ✅ |
+| Front | `F` | ✅ |
+| 13:00 | 12:59:39 local | ✅ |
+
+All three predictions hold. The free fields: **34.8430 GHz**, strength **1** of
+8, raw signal 21, mute code 1 — a weak, brief signal, 2.79 s of it.
+
+This is a different source from §19's: 34.843 against 35.478 GHz. Note that
+34.843 sits 143 MHz above the 34.7 GHz US Ka allocation, and at strength 1 for
+under three seconds this is as consistent with a door opener or a
+collision-avoidance radar as with police Ka. Nothing here identifies the
+emitter, and nothing should be read as doing so.
+
+### 23.2 The matcher change is stamped, but still not exercised
+
+The derived track is stamped `cost-greedy-2` and the encounter produced **one
+track**, not several:
+
+```
+alert_start  19:59:39.537   KA  strength 1  34.843  front
+alert_end    20:00:41.104   duration 2.79 s, 7 samples, max strength 1
+```
+
+**This does not test the tolerance fix.** §19.5.1 widened
+`BAND_TOLERANCE_GHZ["KA"]` from 0.025 to 0.050 because one physical source's
+reported frequency jittered by 0.030 GHz and split into six tracks. Here the
+frequency was **constant to four decimal places across all seven packets**, so
+there was no jitter for any tolerance to fail on. A single track is the correct
+outcome and it would also have been the outcome under `cost-greedy-1`.
+
+The fix remains **unexercised in the field**. What this encounter does confirm
+is narrower and still worth having: the matcher runs, stamps its version, and
+does not invent tracks on a clean signal.
+
+Note also that `alert_end` is timestamped 62 s after the last packet while
+`duration_s` reads 2.79 s. Those measure different things — the duration spans
+first to last signal, the end event is emitted when the track is closed, which
+here was when the detector link dropped as the vehicle was parked.
+
+### 23.3 The finding that matters: no position, and none anywhere
+
+`record_coordinates` had been on for hours. This alert carries **no latitude**.
+
+```
+GNSS fixes in the 3 minutes around the alert : 0
+last fix before it                           : 19:45:49 UTC (14 min earlier)
+first fix after it                           : none
+alert_events, all time                       : 53
+alert_events carrying a position             : 0
+```
+
+The vehicle had driven a floor underground at 19:40 (§22). The receiver was not
+broken — sampled live it still saw ten satellites — but it was using **three**,
+one short of the four a 3D fix needs, at a median **10.5 dB-Hz** against 25
+outdoors. So it tracked satellites and could not solve a position, for fourteen
+minutes and counting.
+
+**This is the silent failure, demonstrated rather than predicted.** The radar
+path worked perfectly: seven packets, none rejected, every field decoded, the
+event written to history. The position path produced nothing, and *nothing said
+so*. A consumer reading `alert_events` sees a complete, well-formed Ka encounter
+with a null coordinate, and no indication that a coordinate was expected.
+
+For the mapping use this data is being collected for, the consequence is
+specific: **a hazard map built from this will be blank exactly where GPS is
+hardest** — garages, tunnels, underpasses, dense urban canyon — which overlaps
+substantially with where fixed enforcement is sited. The absence will not look
+like a gap in the data; it will look like an absence of hazards.
+
+### 23.4 What would fix it
+
+Nothing in this repository. The alert row already records what it can, and a
+fix that was never obtained cannot be attached to it. The options are the ones
+§22 arrived at: more open sky above the antenna, which is what buys the fifth
+through eighth satellite and with them the margin to hold a fix in a hard place.
+
+**How legible is the absence?** More than first appears, and the answer was
+worth checking before asserting one. `record_event` sets `gnss_mode`,
+`gnss_speed_mps` and `gnss_track_deg` from the fix *independently* of
+`record_coordinates` — only latitude and longitude are gated. So the stored row
+already separates two cases that both show a null coordinate:
+
+| `lat` | `gnss_mode` | means |
+|---|---|---|
+| null | **present** | a fix existed; coordinates were deliberately withheld |
+| null | null | **no fix was available** |
+
+This encounter is the second row: `gnss_mode` is null, so the row itself records
+that no position could be had, not that one was withheld. And whether the client
+was running at all is recoverable per session, by asking whether that
+`session_id` has any `gnss_fixes` rows.
+
+What remains genuinely unrecorded is narrow: at the instant of a given alert,
+"the GNSS client is disabled" and "the client is enabled and cannot fix" both
+write a null `gnss_mode`. The session-level check resolves it in practice, and
+no schema change is proposed on the strength of a distinction that is already
+answerable.
