@@ -545,13 +545,32 @@ talking, just not locked. Expect satellites-visible to climb before
 satellites-used does. If satellites *visible* stays at zero for several minutes,
 that is sky view, not patience.
 
-**The ordering matters.** If a stopgap `gpsd` is already serving the receiver
-on a spare port, it *works* — and it holds the serial device. Switching the
-collector onto the system `gpsd` before that one has the device leaves the
-vehicle with no position feed and nothing saying so; the collector keeps running
-and keeps recording radar, just with no position attached. Prove the system
-`gpsd` has the device first, then retire the stopgap.
-`scripts/setup-gnss.sh` refuses to switch when it cannot, and says so.
+**The ordering matters, and it is not the obvious order.** If a stopgap `gpsd`
+is already serving the receiver on a spare port, it *works* — and it holds the
+serial device **exclusively**, because two daemons cannot own one serial port.
+
+So "prove the new one works before stopping the old one" deadlocks. The system
+`gpsd` cannot acquire a device the stopgap is holding, the check fails, and the
+stopgap is never released. That is not hypothetical: the first version of
+`setup-gnss.sh` did exactly this on the vehicle, and left the node with `gpsd`
+correctly configured, the stopgap still running, and — once the stopgap later
+died — the collector pointed at a port with nothing behind it. `gpsd`'s own
+journal said so plainly:
+
+```
+gpsd:ERROR: SER: /dev/ttyUSB0 already opened by another process
+```
+
+The order that works is: **release the stopgap, restart the system `gpsd`, then
+check — and if the check fails, put the stopgap back.** The collector's
+configuration is moved only after the check passes, so a failure at any point
+leaves the node on a position feed that works. `scripts/setup-gnss.sh` does
+this, including the rollback.
+
+**Counting the stopgap needs care too.** `pgrep -f 'gpsd .*-S 2948'` matches any
+process whose command line *contains* that text — including the shell you handed
+it to. It reports a stopgap that is not there. Anchor on the daemon's own path:
+`pgrep -f '^/usr/sbin/gpsd .*-S 2948'`.
 
 **No root?** If you cannot edit `/etc/default/gpsd`, a private instance on a
 spare port works with only `dialout`, and the collector can be pointed at it:

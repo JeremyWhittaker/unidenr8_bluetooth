@@ -14,13 +14,22 @@
 # registers it.  gpsd then accepts connections and serves no device, which from
 # the client side is indistinguishable from a receiver that cannot see the sky.
 #
-# THE ORDERING MATTERS
+# THE ORDERING MATTERS, AND IT IS NOT THE OBVIOUS ORDER
 #
 # A node may already be running a private gpsd on a spare port as a stopgap
-# (see docs/RUNBOOK.md).  That instance holds the serial device, and it works.
-# This script therefore proves the *system* gpsd has the device before it
-# stops the stopgap or moves the collector onto it.  Doing it the other way
-# round leaves a vehicle with no position feed and nothing saying so.
+# (see docs/RUNBOOK.md).  That instance *works*, and it holds the serial
+# device -- exclusively, because two daemons cannot own one serial port.
+#
+# So "prove the new one works before stopping the old one" deadlocks: the
+# system gpsd cannot acquire a device the stopgap is holding, the check fails,
+# and the stopgap is never released.  The first version of this script did
+# exactly that, and left a node with gpsd correctly configured, the stopgap
+# still running, and the collector pointed at neither.
+#
+# The order that works is: release the stopgap, restart the system gpsd, then
+# check -- and if the check fails, *put the stopgap back* before returning.
+# The collector's configuration is only moved after the check passes, so a
+# failure anywhere leaves the node on a position feed that works.
 #
 # HOST is deliberately not defaulted to a name or address: the node is
 # reachable by a private VPN name that this repository must not record.  It is
@@ -97,16 +106,44 @@ say "using device: $DEVICE"
 say "writing /etc/default/gpsd (sudo on the node will prompt)"
 # -t so sudo can ask for a password on this terminal.  The remote command is
 # deliberately short and quoted once: this is the only privileged step.
+# gpsd is enabled but NOT restarted here -- it cannot take the device until
+# the stopgap below has let go of it.
 ssh -t "$HOST" "
 set -e
 sudo cp -n /etc/default/gpsd /etc/default/gpsd.bak 2>/dev/null || true
 sudo sed -i 's|^DEVICES=.*|DEVICES=\"$DEVICE\"|; s|^GPSD_OPTIONS=.*|GPSD_OPTIONS=\"-n\"|' /etc/default/gpsd
 grep -c . /etc/default/gpsd >/dev/null
 sudo systemctl enable gpsd
-sudo systemctl restart gpsd
 "
 
-# ------------------------------------------- 3. prove it before tearing down
+# --------------------------------- 3. release the stopgap, then start the real one
+
+# `pgrep -f` matches any process whose command line contains the pattern --
+# including the shell that was handed the pattern. Counting the daemon by its
+# own binary path avoids reporting a stopgap that is not there.
+STOPGAP_SEEN="$(ssh -o BatchMode=yes "$HOST" \
+    "pgrep -c -f '^/usr/sbin/gpsd .*-S $STOPGAP_PORT' 2>/dev/null || echo 0")"
+if [ "${STOPGAP_SEEN:-0}" -gt 0 ]; then
+    say "releasing the stopgap gpsd on port $STOPGAP_PORT so the device is free"
+    ssh -o BatchMode=yes "$HOST" "pkill -f '^/usr/sbin/gpsd .*-S $STOPGAP_PORT' || true"
+    sleep 2
+else
+    say "no stopgap gpsd running"
+fi
+
+restore_stopgap() {
+    [ "${STOPGAP_SEEN:-0}" -gt 0 ] || return 0
+    say "restoring the stopgap on port $STOPGAP_PORT so the node keeps a fix"
+    ssh -o BatchMode=yes "$HOST" \
+        "setsid nohup /usr/sbin/gpsd -n -S $STOPGAP_PORT $DEVICE \
+         >/tmp/gpsd-user.log 2>&1 </dev/null & sleep 2" || true
+}
+
+say "starting the system gpsd"
+ssh -t "$HOST" "sudo systemctl restart gpsd"
+sleep 2
+
+# ------------------------------------------- 4. prove it before moving anything
 
 say "checking the system gpsd actually has the device"
 PROBE_OUTPUT="$(ssh -o BatchMode=yes "$HOST" "TARGET_PORT=$TARGET_PORT python3 -" <<'REMOTE'
@@ -159,10 +196,12 @@ say "$PROBE_OUTPUT"
 
 case "$PROBE_OUTPUT" in
     *devices=NONE*|*unreachable*)
+        restore_stopgap
         echo >&2
         echo "The system gpsd still has no device, so nothing was switched over." >&2
-        echo "The node is left exactly as it was -- if a stopgap gpsd was" >&2
-        echo "serving the receiver on port $STOPGAP_PORT, it still is." >&2
+        echo "The collector's configuration was not touched, and any stopgap that" >&2
+        echo "was serving the receiver has been put back -- so the node is still" >&2
+        echo "on a position feed that works." >&2
         echo >&2
         echo "Read the receiver directly to tell a gpsd fault from a dead one:" >&2
         echo "  python3 -c \"import serial;p=serial.Serial('$DEVICE',4800,timeout=2);" >&2
@@ -179,10 +218,7 @@ case "$PROBE_OUTPUT" in
         ;;
 esac
 
-# ------------------------------- 4. retire the stopgap and move the collector
-
-say "retiring any stopgap gpsd on port $STOPGAP_PORT"
-ssh -o BatchMode=yes "$HOST" "pkill -f 'gpsd .*-S $STOPGAP_PORT' || true"
+# ------------------------------------------------------ 5. move the collector
 
 say "pointing the collector at port $TARGET_PORT (coordinates: $COORDINATES)"
 ssh -o BatchMode=yes "$HOST" \
@@ -223,7 +259,7 @@ say "restarting the collector"
 ssh -o BatchMode=yes "$HOST" "sudo systemctl restart unidenr8-collector"
 sleep 8
 
-# ------------------------------------------------------------- 5. what we got
+# ------------------------------------------------------------- 6. what we got
 
 say "verifying"
 ssh -o BatchMode=yes "$HOST" "TARGET_PORT=$TARGET_PORT bash -s" <<'REMOTE'
@@ -231,7 +267,7 @@ set -u
 echo "  gpsd active   : $(systemctl is-active gpsd)"
 echo "  gpsd at boot  : $(systemctl is-enabled gpsd 2>/dev/null || echo unknown)"
 echo "  collector     : $(systemctl is-active unidenr8-collector)"
-echo "  stopgap gpsd  : $(pgrep -c -f 'gpsd .*-S 2948' || true) process(es)"
+echo "  stopgap gpsd  : $(pgrep -c -f '^/usr/sbin/gpsd .*-S 2948' 2>/dev/null || echo 0) process(es)"
 python3 - <<'PY'
 import os, sqlite3
 db = os.path.expanduser("~/unidenr8/.state/history.db")
