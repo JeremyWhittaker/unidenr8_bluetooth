@@ -39,6 +39,7 @@ never rounds the second up to the first.
 | Enumerate every GATT attribute the device exposes | ✅ Works | §16.1 — 14 characteristics, no undocumented vendor surface |
 | Read the settings blocks | 🟡 Partial | §13.4 — 240 B each, read fine; **contents undecoded** |
 | Read the POI database | ✅ Works | §13 — first non-empty POI read reported on any R-series unit |
+| Speed camera / POI warnings | ✅ Works | §21 — `SPEEDCAM,<distance>,<limit>` decoded; **distance is in feet**, established from the vehicle's own speed. 365/365 packets decoded |
 | Radar alert events (start / update / end) | ✅ Works | §19 — a real Ka encounter, 252 packets, 0 rejected, 0 unrecognised |
 | Every active-alert field: band, strength, raw signal, frequency, direction, mute | ✅ Works | §19.1 — all promoted from UPSTREAM to OBSERVED in one capture |
 

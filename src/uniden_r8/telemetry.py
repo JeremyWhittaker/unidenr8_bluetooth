@@ -270,9 +270,9 @@ COMPASS_POINTS: Final[frozenset[str]] = frozenset(
     {"N", "NE", "E", "SE", "S", "SW", "W", "NW"}
 )
 
-#: POI warning types, as the app appears to name them.  Candidate evidence: the
-#: only POI field ever observed on either detector is the literal ``0``, which
-#: exercises none of this.
+#: POI warning types, as the app appears to name them.  ``SPEEDCAM`` is now
+#: OBSERVED -- 57 consecutive packets on a drive, 2026-09-08 (EVIDENCE 21).
+#: The other four remain upstream's naming and have never been seen.
 POI_KINDS: Final[frozenset[str]] = frozenset(
     {"SPEEDCAM", "REDLIGHT", "USERMARK", "SPEEDTRAP", "AIRPATROL"}
 )
@@ -494,11 +494,25 @@ class DetectorGps:
 class PoiWarning:
     """The POI sub-group of a telemetry packet: field 1.
 
-    Only the inactive form -- a literal ``0`` -- has ever been observed, on
-    either detector.  The three-part active form is upstream's reading of the
-    app, so this decodes no further than "something is being warned about" plus
-    the raw text: a structure nobody has seen populated does not get a parser
-    that can appear to succeed.
+    For most of this project's life only the inactive form -- a literal ``0`` --
+    had ever been observed, and the rule was that a structure nobody has seen
+    populated does not get a parser that can appear to succeed.
+
+    That precondition changed on 2026-09-08: a speed camera warning arrived on a
+    drive and produced 57 consecutive packets of ``SPEEDCAM,<distance>,<limit>``
+    (EVIDENCE 21).  The middle field counted 974 down to 9 as the vehicle
+    approached, held at 229 for the thirty-four seconds it was stopped, and
+    resumed counting as it moved off, so it is a distance to the warned object.
+    Its **unit is feet**, established by dividing the per-second change into the
+    detector's own speed rather than by assuming: the result matches ft/s->mph
+    and is out by a factor of 3.4 against m/s->mph.  The third field held
+    ``45`` throughout, which is a posted limit and not a distance.
+
+    So the three-part form is now decoded -- conservatively.  A group is only
+    decoded when it has exactly three parts, the first is a known POI kind, and
+    the other two are non-negative integers.  Anything else keeps ``raw`` and
+    decodes to nothing, because the alternative is a parser that can appear to
+    succeed on a shape nobody has seen.
     """
 
     active: bool = False
@@ -506,13 +520,29 @@ class PoiWarning:
     #: The coordinate tripwire fired on this group: two adjacent sub-fields both
     #: parsed as signed decimal degrees.  ``raw`` is withheld when this is true.
     suspect_pair: bool = False
+    #: The POI type word, when it is one this project knows.  ``SPEEDCAM`` is
+    #: observed; the rest of the vocabulary is inherited and unseen.
+    kind: str | None = None
+    #: Distance to the warned object, in **feet**.  See the class docstring for
+    #: how the unit was established.
+    distance_ft: int | None = None
+    #: The posted speed limit the detector reports alongside the warning, mph.
+    speed_limit_mph: int | None = None
+
+    @property
+    def decoded(self) -> bool:
+        """True when the three-part form was understood."""
+        return self.kind is not None
 
     def detailed(self) -> dict[str, Any]:
         return {
             "active": self.active,
             "raw": self.raw,
             "suspect_pair": self.suspect_pair,
-            "decoded": None,  # see the class docstring: no evidence, no parser
+            "decoded": self.decoded,
+            "kind": self.kind,
+            "distance_ft": self.distance_ft,
+            "speed_limit_mph": self.speed_limit_mph,
         }
 
 
@@ -674,17 +704,25 @@ def _parse_gps_group(raw: str | None) -> DetectorGps:
 
 
 def _parse_poi_group(raw: str | None) -> PoiWarning:
-    """Decode field 1.  Only the inactive form has ever been observed.
+    """Decode field 1: type, distance in feet, and posted limit.
 
-    The group is retained as sanitised text, not parsed.  Upstream reads it as
-    type, distance and speed limit; nobody has seen it populated on any
-    detector, so a structure nobody has seen does not get a parser that can
-    appear to succeed.  What it does get is the same coordinate tripwire the
-    GPS group has, for a stronger reason: POI is the characteristic that holds
-    saved camera locations and user marks, and if a warning ever carries the
-    position of the thing being warned about, that is the most sensitive text
-    the detector sends.  If the tripwire fires, ``raw`` is dropped and the
-    boolean survives -- and the documentation is what needs correcting.
+    The active form was unobserved for most of this project's life and was
+    therefore kept as text only.  A real speed camera warning (EVIDENCE 21)
+    settled the shape and the distance unit, so the three-part form is now
+    decoded -- and only that form.  A group that does not match keeps its raw
+    text and decodes to nothing, which is the same rule as before for
+    everything still unseen.
+
+    The coordinate tripwire runs first and is unchanged.  POI is the
+    characteristic that holds saved camera locations and user marks, and if a
+    warning ever carries the position of the thing being warned about, that is
+    the most sensitive text the detector sends.  If it fires, ``raw`` is dropped
+    and the boolean survives -- and the documentation is what needs correcting.
+
+    Note the tripwire cannot fire on a well-formed warning: it requires a
+    decimal point and a non-integral value, and both numeric sub-fields here are
+    integers.  That is a property worth keeping rather than relying on, so the
+    decode still runs only after the tripwire has passed.
     """
     if not raw or raw == "0":
         return PoiWarning(active=False)
@@ -694,7 +732,31 @@ def _parse_poi_group(raw: str | None) -> PoiWarning:
         for left, right in zip(parts, parts[1:], strict=False)
     ):
         return PoiWarning(active=True, raw=None, suspect_pair=True)
-    return PoiWarning(active=True, raw=_safe_group(raw, limit=48))
+
+    warning = PoiWarning(active=True, raw=_safe_group(raw, limit=48))
+    if len(parts) == 3 and parts[0] in POI_KINDS:
+        distance, limit = _non_negative_int(parts[1]), _non_negative_int(parts[2])
+        if distance is not None and limit is not None:
+            warning.kind = parts[0]
+            warning.distance_ft = distance
+            warning.speed_limit_mph = limit
+    return warning
+
+
+def _non_negative_int(value: str) -> int | None:
+    """Parse a plain non-negative integer, or return ``None``.
+
+    Deliberately strict: no sign, no decimal point, no whitespace beyond what
+    the caller already stripped.  A distance that arrives as ``1.5e3`` or
+    ``-40`` is a shape this has not seen, and the honest answer to an unseen
+    shape is to decode nothing and keep the text.
+    """
+    if not value or not value.isdigit():
+        return None
+    try:
+        return int(value)
+    except ValueError:      # pragma: no cover - isdigit already guarantees this
+        return None
 
 
 def parse_telemetry(payload: bytes | bytearray | str) -> Telemetry:

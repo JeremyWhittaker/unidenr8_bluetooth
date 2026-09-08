@@ -7,6 +7,7 @@ could be written and reviewed before it ever ran against the detector.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -945,3 +946,93 @@ def test_an_unfamiliar_gps_status_letter_stays_unknown():
         reading = telemetry.parse_telemetry(b"13.2&0&,0,0," + letter + b"&0&12&N&N")
         assert reading.gps.locked is None, letter
         assert reading.publishable()["gps_locked"] is None, letter
+
+
+# ------------------------------------------- the observed speed camera warning
+
+#: The real approach, verbatim from the drive of 2026-09-08 (EVIDENCE 21):
+#: distance in feet counting down, posted limit constant, a stop at 229 ft, then
+#: the resumed approach. Carries no coordinate -- a distance is not a position.
+SPEEDCAM_APPROACH = [
+    "SPEEDCAM,974,45", "SPEEDCAM,912,45", "SPEEDCAM,780,45", "SPEEDCAM,718,45",
+    "SPEEDCAM,593,45", "SPEEDCAM,534,45", "SPEEDCAM,479,45", "SPEEDCAM,429,45",
+    "SPEEDCAM,383,45", "SPEEDCAM,341,45", "SPEEDCAM,305,45", "SPEEDCAM,278,45",
+    "SPEEDCAM,255,45", "SPEEDCAM,239,45", "SPEEDCAM,232,45", "SPEEDCAM,229,45",
+    "SPEEDCAM,219,45", "SPEEDCAM,206,45", "SPEEDCAM,183,45", "SPEEDCAM,154,45",
+    "SPEEDCAM,121,45", "SPEEDCAM,88,45", "SPEEDCAM,49,45", "SPEEDCAM,9,45",
+]
+
+
+def test_the_observed_speed_camera_warning_decodes():
+    """The capture that made a parser legitimate at all."""
+    warning = telemetry._parse_poi_group("SPEEDCAM,974,45")
+    assert warning.active is True
+    assert warning.decoded is True
+    assert warning.kind == "SPEEDCAM"
+    assert warning.distance_ft == 974
+    assert warning.speed_limit_mph == 45
+    assert warning.raw == "SPEEDCAM,974,45"
+    assert warning.suspect_pair is False
+
+
+def test_the_whole_approach_decodes_monotonically():
+    """Distance falls to single digits as the camera is reached.
+
+    A parser that decoded the fields in the wrong order would still produce
+    numbers; it would not produce a monotone approach with a constant limit.
+    """
+    decoded = [telemetry._parse_poi_group(raw) for raw in SPEEDCAM_APPROACH]
+    assert all(w.decoded for w in decoded)
+    assert {w.speed_limit_mph for w in decoded} == {45}, "the limit is not the distance"
+    distances = [w.distance_ft for w in decoded]
+    assert distances == sorted(distances, reverse=True), "distance must fall"
+    assert distances[0] == 974 and distances[-1] == 9
+
+
+def test_a_speed_camera_warning_never_trips_the_coordinate_tripwire():
+    """Both numeric sub-fields are integers, and the tripwire needs a decimal.
+
+    Worth pinning: if a warning ever did trip it, `raw` would be withheld and
+    the decode starved -- which is the correct behaviour, and the reason the
+    decode runs only after the tripwire passes.
+    """
+    for raw in SPEEDCAM_APPROACH:
+        assert telemetry._parse_poi_group(raw).suspect_pair is False
+
+
+def test_an_unknown_poi_shape_keeps_its_text_and_decodes_nothing():
+    """The rule that predates the capture, still enforced for the unseen."""
+    for raw in (
+        "SPEEDCAM,974",              # too few parts
+        "SPEEDCAM,974,45,extra",     # too many
+        "MYSTERYCAM,974,45",         # not a known kind
+        "SPEEDCAM,-40,45",           # negative distance
+        "SPEEDCAM,1.5e3,45",         # not a plain integer
+        "SPEEDCAM,abc,45",
+    ):
+        warning = telemetry._parse_poi_group(raw)
+        assert warning.active is True, raw
+        assert warning.decoded is False, raw
+        assert warning.kind is None and warning.distance_ft is None, raw
+        assert warning.raw is not None, "the text must survive an unknown shape"
+
+
+def test_the_inactive_form_is_still_inactive():
+    warning = telemetry._parse_poi_group("0")
+    assert warning.active is False and warning.decoded is False
+
+
+def test_a_suspect_pair_still_withholds_and_does_not_decode():
+    """A warning carrying something coordinate-shaped is refused, not parsed."""
+    warning = telemetry._parse_poi_group("SPEEDCAM,33.3933,-111.7538")
+    assert warning.suspect_pair is True
+    assert warning.raw is None
+    assert warning.decoded is False
+
+
+def test_a_decoded_warning_publishes_no_position():
+    """A distance is not a location, and the published shape must prove it."""
+    from uniden_r8.privacy import looks_like_position
+    body = json.dumps(telemetry._parse_poi_group("SPEEDCAM,229,45").detailed())
+    assert not looks_like_position(body)
+

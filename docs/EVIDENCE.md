@@ -1977,3 +1977,106 @@ observed" stands, and is now "observed and referenced" for five of them.
 * **No alert.** One snapshot arrived and it was the idle `0&0&0&0`. The Ka
   tolerance widened in `cost-greedy-2` still has no post-change encounter.
 * **The `gpsd` setup is not yet durable** — see [`RUNBOOK.md`](RUNBOOK.md).
+
+---
+
+## 21. A speed camera warning — the POI field decoded at last
+
+**Grade: OBSERVED.** 2026-09-08, on a drive. The operator reported "speed camera
+alert around 12:28" and the capture was retrieved afterwards.
+
+Telemetry field 1 — the POI group — had been the longest-standing undecoded
+structure in this project. Every packet ever captured, on either detector, held
+the literal `0`. `PoiWarning`'s docstring carried the rule that justified
+leaving it alone: *a structure nobody has seen populated does not get a parser
+that can appear to succeed.* This section is that precondition being met.
+
+### 21.1 What arrived
+
+**365 packets**, every one of the form `SPEEDCAM,<number>,45`. The middle field
+moves; the third does not.
+
+```
+19:28:05  SPEEDCAM,974,45   47 mph
+19:28:06  SPEEDCAM,912,45   45 mph
+19:28:08  SPEEDCAM,780,45   44 mph
+19:28:11  SPEEDCAM,593,45   40 mph
+19:28:15  SPEEDCAM,383,45   29 mph
+19:28:19  SPEEDCAM,255,45   11 mph
+19:28:22  SPEEDCAM,229,45    0 mph   <- stopped
+   ...    (229 held for 34 s, 26 packets, speed 0)
+19:28:56  SPEEDCAM,229,45    4 mph   <- moving again
+19:29:00  SPEEDCAM,183,45   21 mph
+19:29:04  SPEEDCAM,49,45    27 mph
+19:29:05  SPEEDCAM,9,45     29 mph   <- passing it
+```
+
+The middle field falls monotonically while the vehicle moves, **freezes exactly
+while the vehicle is stopped**, and resumes falling when it moves off. It is a
+distance to the warned object. Nothing else behaves that way.
+
+### 21.2 The unit is feet, and that was measured rather than assumed
+
+The obvious trap is to read a distance and assume a unit. The vehicle's own
+speed is in the same packet, so the unit can be *derived*: divide the
+per-second change in the field by the elapsed time, and compare the result
+against the detector's reported speed.
+
+| hypothesis | predicted mph per (unit/s) | measured |
+|---|---|---|
+| **1 unit = 1 foot** | 0.6818 | **0.6518** |
+| 1 unit = 1 metre | 2.2369 | out by 3.4× |
+
+21 paired samples. Feet is right and metres is not close.
+
+The 4% shortfall is itself explained, and the explanation is checkable. Most
+samples come from the deceleration into the stop, where the distance delta
+measures the *average* speed across the interval while the reported figure is
+the speed at its end — so the derived rate runs high and the ratio low. On the
+acceleration away from the light the same bias inverts, giving ratios of 0.70
+to 1.17. A unit error would not change sign with the sign of the acceleration.
+
+### 21.3 The third field is a posted limit
+
+It held `45` across all 365 packets, through a speed range of 0 to 47 mph and a
+distance range of 974 ft to 3 ft. It is neither a distance nor a speed the
+vehicle was doing. Upstream calls it the speed limit and nothing here
+contradicts that; unlike the distance, its *unit* is not independently
+established — mph is inferred from the road, not measured.
+
+### 21.4 What was implemented, and what deliberately was not
+
+`_parse_poi_group` now decodes the three-part form, under a gate that keeps the
+old rule for everything still unseen: exactly three parts, a first part in the
+known POI vocabulary, and two non-negative plain integers. Anything else keeps
+its raw text and decodes to nothing — a `1.5e3`, a negative distance or an
+unknown kind produces `decoded=False`, not a guess.
+
+Re-parsing the stored capture: **365 of 365 decoded, none undecoded.**
+
+`SPEEDCAM` is the only kind observed. `REDLIGHT`, `USERMARK`, `SPEEDTRAP` and
+`AIRPATROL` remain upstream's naming, never seen, and the vocabulary comment now
+says which is which rather than dismissing all five together.
+
+### 21.5 The tripwire, and why the decode runs after it
+
+The coordinate tripwire on this group is unchanged and still runs first. It
+cannot fire on a well-formed warning — it requires a decimal point and a
+non-integral value, and both numeric sub-fields are integers — but that is a
+property to keep rather than to rely on. If a warning ever *does* carry the
+position of the thing being warned about, `raw` is withheld and the decode is
+starved, which is the correct outcome: POI is the characteristic holding saved
+camera locations, and a warning carrying one is the most sensitive text this
+detector sends. A test pins both directions, and another pins that the
+published form of a decoded warning does not look like a position.
+
+### 21.6 What this makes possible
+
+A distance is not a location — but a distance **plus** the vehicle's own
+position is one. With `record_coordinates` on, each of these packets pairs a
+range to the camera with a GNSS fix, and a handful of ranges from different
+bearings trilaterates the camera itself. That is a materially better way to map
+a fixed hazard than plotting where the alert happened to fire, and it needs no
+new capture: the raw text is already stored losslessly in `telemetry.poi_raw`.
+
+Not implemented here. Recorded because the data now supports it.

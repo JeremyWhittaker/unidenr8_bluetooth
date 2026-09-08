@@ -228,7 +228,7 @@ upstream calls each of them. §3.6 explains why the two differ.
 | # | Published as | Upstream's name | Format | Grade (meaning) | How this project handles it |
 |---|---|---|---|---|---|
 | 0 | `voltage` / `voltage_v` | voltage | decimal string, `12.1` | OBSERVED | `float()`; `None` if it does not parse. The only telemetry number in schema 1. |
-| 1 | `poi_warning` | POI | `0`, or a comma group | OBSERVED for the literal `0`; active form UPSTREAM-UNVERIFIED | `_parse_poi_group`; see §3.5 |
+| 1 | `poi_warning` | POI | `0`, or `KIND,distance_ft,limit` | **OBSERVED** — 365 `SPEEDCAM` packets, distance unit measured (§21) | `_parse_poi_group`; see §3.5 |
 | 2 | `detector_gps` | GPS | four comma fields | OBSERVED (shape) | `_parse_gps_group`; see §3.3 |
 | 3 | `field_3_raw` | `warning` | short token, `0` in the example | UPSTREAM | `_safe_word(limit=16)`, kept verbatim, never interpreted |
 | 4 | `field_4_raw` | `scanCount` | short token, `12` in the example | UPSTREAM-UNVERIFIED | `_safe_word(limit=16)`; `Telemetry.scan_field` exposes `int()` of it for the history writer |
@@ -325,17 +325,36 @@ noticed rather than published.
 
 ### 3.5 The POI sub-group: field 1
 
-Only the inactive form — a literal `0` — has ever been observed, on either
-detector. The active form is upstream's reading of the decompiled app.
+**The active form is now OBSERVED** (`docs/EVIDENCE.md` §21): a speed camera
+warning on 2026-09-08 produced 365 packets of
 
-`_parse_poi_group` therefore decodes no further than "something is being warned
-about", plus at most 48 characters of validated text:
+```
+SPEEDCAM,<distance>,<limit>
+```
 
-| Field 1 | `PoiWarning.active` | `PoiWarning.raw` | `PoiWarning.suspect_pair` |
-|---|---|---|---|
-| `0` or empty | `False` | `None` | `False` |
-| two adjacent sub-fields both look like decimal degrees | `True` | `None` | `True` |
-| anything else | `True` | `_safe_group(limit=48)` of the group | `False` |
+The distance is in **feet** — derived from the vehicle's own speed in the same
+packet, not assumed: the per-second change matches ft/s→mph and is out by a
+factor of 3.4 against m/s→mph. It falls monotonically on approach, freezes while
+the vehicle is stopped, and reaches single digits at the camera. The third field
+held `45` throughout and is a posted limit; unlike the distance, its unit is
+inferred rather than measured.
+
+`_parse_poi_group` decodes that form and only that form:
+
+| Field 1 | `active` | `raw` | `suspect_pair` | `decoded` |
+|---|---|---|---|---|
+| `0` or empty | `False` | `None` | `False` | `False` |
+| two adjacent sub-fields both look like decimal degrees | `True` | `None` | `True` | `False` |
+| 3 parts, known kind, two non-negative integers | `True` | text | `False` | **`True`** |
+| anything else | `True` | `_safe_group(limit=48)` | `False` | `False` |
+
+A decoded warning carries `kind`, `distance_ft` and `speed_limit_mph`. The last
+row is the old rule, kept: an unknown kind, a negative distance or a `1.5e3`
+decodes to nothing and keeps its text, because a parser that can appear to
+succeed on an unseen shape is worse than none.
+
+`SPEEDCAM` is the only kind ever seen. `REDLIGHT`, `USERMARK`, `SPEEDTRAP` and
+`AIRPATROL` remain upstream's naming.
 
 The coordinate tripwire on the third row is the same mechanism the GPS group
 has, and it is here for a stronger reason: POI is the characteristic that holds
@@ -344,10 +363,12 @@ of the thing being warned about, that is the most sensitive text the detector
 sends. If it fires, the text is withheld and the documentation is what needs
 correcting.
 
-`detailed()` reports `"decoded": None` explicitly. A structure nobody has ever
-seen populated does not get a parser that can appear to succeed. Schema 1
-publishes a bare boolean, `poi_warning`, and never the detail — a warning's
-type and distance describe where the vehicle is.
+The tripwire cannot fire on a well-formed warning — it needs a decimal point and
+a non-integral value, and both numeric sub-fields are integers — but the decode
+still runs after it rather than instead of it. Schema 1 publishes a bare
+boolean, `poi_warning`, and never the detail: a warning's type and distance
+describe where the vehicle is, and a distance paired with a fix locates the
+camera (§21.6).
 
 ### 3.5b The command-response characteristic
 
