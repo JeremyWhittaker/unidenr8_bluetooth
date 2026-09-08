@@ -539,6 +539,39 @@ python3 -c "import serial;p=serial.Serial('/dev/ttyUSB0',4800,timeout=2);
 Sentences appearing here prove the receiver, the cable and the permissions, and
 narrow the fault to `gpsd` alone. A BU-353S4 runs at **4800 baud**, not 9600.
 
+**Check the mounting position, not just the fix.** "Does it have a fix?" is the
+wrong question: a receiver tucked out of sight holds a fix perfectly well on a
+parked car and then loses it under the first overpass. What matters is the
+*margin* — how many satellites it is using above the four a 3D fix needs.
+
+```bash
+./scripts/gnss-quality.sh          # SECS=90 by default
+```
+
+A measured example, from moving the receiver on this vehicle to a spot with no
+clear view of the sky:
+
+| | clear view, in motion | obstructed, parked |
+|---|---|---|
+| 3D fix | 535/535 | 180/180 |
+| satellites **used** | 4–9, median **6** | 4–5, median **5** |
+| epx (east–west) | median 13.3 m | median 10.9 m |
+| epy (north–south) | median 17.3 m | median **27.8 m** |
+| combined 2D | ~21.8 m | ~29.9 m |
+
+Both positions hold a fix, which is exactly why a fix is not the test. The
+obstructed one runs on **five** satellites where the clear one had up to nine —
+one above the floor instead of five. And the error is **lopsided**, 2.6× worse
+north–south than east–west, which is the signature of a partly blocked sky:
+satellites visible in one direction only, as a puck against a pillar or under a
+metal panel produces. Glass and plastic pass GNSS; metal does not.
+
+The consequence is not a worse number, it is a fragile one. A fix with one spare
+satellite survives a parked car and fails under a bridge or a tree line, and it
+fails *silently* — the collector keeps recording radar and simply attaches no
+position, or a worse one. Re-check with a drive before trusting positions from a
+new mounting spot.
+
 **A cold start is not a fault.** A receiver with no recent almanac reports GGA
 fix quality `0`, `00` satellites and RMC status `V` while it acquires -- it is
 talking, just not locked. Expect satellites-visible to climb before
