@@ -215,8 +215,25 @@ that actually protects it — see [`SAFETY.md`](SAFETY.md).
 **Operational, and not fixable in software**
 
 The node's power path decides whether anything is captured at all. The PiSugar 2
-(IP5209) **cannot power the Pi back on** after it cuts, so a node that powers
-down stays down until somebody reaches the vehicle. Two drives were lost to this.
+(IP5209) **cannot reliably power the Pi back on** after it cuts, so a node that
+powers down stays down until somebody reaches the vehicle. Two drives were lost
+to this.
+
+That is now sourced rather than asserted. In `pisugar-power-manager-rs`,
+`toggle_auto_power_on()` gives PiSugar 3 a real `toggle_power_restore` hardware
+event and gives PiSugar 2 a **1/2 Hz RTC retry alarm** instead — the
+maintainers' own comment says so. The feature is listed as supported for
+PiSugar 2 with the footnote *"Two independent power supplies are required"*,
+which PiSugar never explains, and there is an open report of it failing in a
+relay-switched enclosure. Worse, it needs a live cell to keep the alarm firing,
+and this vehicle's ignition-switched feed guarantees a flat cell after a long
+park. [`RUNBOOK.md`](RUNBOOK.md) carries the full reading, with file references.
+
+**Graceful shutdown is not currently enabled**, despite the service being named
+for it: `hummer-battery` runs with `--on-low stop-collector`, which by its own
+definition "leaves the node reachable" rather than halting. That is a deliberate
+trade — a halted PiSugar 2 node cannot be told anything — and it accepts an
+eventual dirty cut in exchange for never needing a wake path.
 
 An earlier reading of this was **wrong, and is corrected here.** The node once
 ran 16 h 42 min including overnight with the cell holding 3.75 V, and that was

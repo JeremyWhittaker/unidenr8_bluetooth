@@ -949,13 +949,69 @@ noticeably less runtime than a full pack would give.
 problem, not a software one, and it is the single largest threat to unattended
 capture — it has cost two drives.
 
-The pack in this vehicle is a **PiSugar2 (IP5209), which cannot power the Pi
-back on.** `toggle_power_restore` is a PiSugar 3 feature and reports "not
-supported" on this chip. Once it cuts output, only the physical switch or a
-scheduled RTC alarm restores it. So any arrangement where the Pi fully powers
-down while the pack owns the power path strands the node until somebody walks
-out to the vehicle, and no amount of configuration in this repository changes
-that.
+The pack in this vehicle is a **PiSugar2 (IP5209), which cannot reliably power
+the Pi back on.** That claim was previously asserted here without a source. It
+now has one, from `PiSugar/pisugar-power-manager-rs` read directly:
+
+* `pisugar-core/src/lib.rs`, `toggle_auto_power_on()` branches on the model.
+  PiSugar 3 calls `toggle_power_restore` — a real hardware power-restore event.
+  Every other model, PiSugar 2 included, falls to a branch carrying the
+  maintainers' own comment: *"pisugar 2 use frequency alarm to restore power"*,
+  and calls `toggle_frequency_alarm`.
+* `pisugar-core/src/sd3078.rs` shows what that alarm is: the RTC set to fire at
+  **1/2 Hz, indefinitely**. PiSugar 2's "auto power on" is a *retry-every-two-
+  seconds poke*, not detection of external power returning.
+
+So the feature is listed as supported — PiSugar's own comparison table says
+`Support**` for the PiSugar2 series — but the asterisk is load-bearing. The
+footnote reads, in full, `**: Two independent power supplies are required`, and
+PiSugar's documentation explains it nowhere.
+
+**Three further findings, all from the source, that make this worse rather than
+better:**
+
+1. `pisugar-core/src/ip5209.rs` disables the chip's own light-load
+   auto-shutdown when `auto_power_on` is on. The safety net that would
+   otherwise cut a nearly-idle rail is deliberately removed, which leaves
+   `pisugar-poweroff` as the *only* thing that can drop the 5 V rail.
+2. `pisugar-poweroff`'s Debian default file ships
+   `OPTS="--model 'PiSugar 3' ..."`. The correct model is set by a debconf
+   prompt during an **interactive** install. A scripted or unattended install —
+   the normal case for a vehicle node — can leave the daemon sending PiSugar 3
+   commands to PiSugar 2 hardware, and failing silently.
+3. Combining those two gives exactly the failure that looks like "auto power on
+   is broken": Linux halts, the rail stays up because nothing successfully cut
+   it, and restoring vehicle power boots nothing — **because the Pi never lost
+   power in the first place.**
+
+**And a report of precisely this setup failing.** Issue #46 on that repository,
+opened January 2022 and still open, is a user with a relay-switched enclosure —
+functionally an ignition-switched car feed — reporting that after power returns
+*"the PiSugar does not automatically turn back on. I will have to turn the
+on/off switch off then on in order for it to start."* A changelog entry
+(`v1.7.1 — Fix PiSugar 2 auto_power_on`) postdates it, but the issue was never
+closed or updated to say it helped. No first-hand report of PiSugar 2
+auto-restore working in a vehicle could be found, positive or negative.
+
+**Why this cannot work on *this* vehicle as currently wired.** The feed is
+ignition-switched (measured above), so the pack is the only thing powering the
+node while parked. Issue #18 on the same repository records that a PiSugar 2
+whose cell fully discharges stops its output and needs the **physical activate
+button** — and the RTC alarm that constitutes PiSugar 2's entire auto-power-on
+mechanism needs a live cell to keep firing. A vehicle parked long enough to flatten
+the pack therefore defeats the wake path by definition, whatever the software says.
+
+Which leaves three honest options, none of them a configuration change:
+
+| | |
+|---|---|
+| **Keep `stop-collector`** | What is configured today. Never halts, so never needs waking; pays for it with an eventual dirty cut when the pack collapses |
+| **Always-hot feed** | Keeps the cell charged so the RTC alarm survives a long park, at 1.2–1.6 Ah/day of parasitic draw |
+| **PiSugar 3** | Real `toggle_power_restore` hardware rather than a retry loop. The only option that makes the ignition-on → boot path deterministic |
+
+Anything that halts the OS while a PiSugar 2 owns the power path strands the
+node until somebody walks out to the vehicle, and no configuration in this
+repository changes that.
 
 `hummer_obdII/docs/RUNBOOK.md`, "Battery watch and graceful shutdown", carries
 the full analysis and owns the decision. Its conclusion, in short: run from
