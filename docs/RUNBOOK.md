@@ -917,12 +917,29 @@ journalctl -u hummer-battery --no-pager -o short-iso | grep -E "[0-9]\.[0-9]{3} 
 uptime -p; vcgencmd get_throttled
 ```
 
-**If it is on permanent (always-hot) vehicle power**, the return problem below is
-solved and replaced with a different one: roughly **1.2-1.6 Ah per day** of
-parasitic draw, so 8-11 Ah a week. On a typical truck battery that is around
-three weeks of standing before you are at half capacity. Fine for a daily
-driver, a real risk at an airport car park. Ignition-switched power gives the
-same guaranteed-up behaviour without the drain.
+**On this vehicle the answer has been measured, and it is ignition-switched.**
+The cell was logged for 3¼ hours against the vehicle's actual state, and the
+only interval in which it gained charge was the drive:
+
+| time (local) | volts | rate | vehicle |
+|---|---|---|---|
+| 08:26 | 4.161 | — | parked |
+| 09:08–09:22 | 4.179 | **+0.13 V/h** | **engine running** |
+| 10:18 | 3.966 | −0.242 V/h | parked |
+| 11:47 | 3.769 | −0.145 V/h | parked |
+
+So it charges while the engine runs and discharges whenever it does not, at
+about **−0.145 V/h** — roughly two and a half hours from a parked 3.77 V to the
+3.40 V threshold. An earlier reading of a 17-hour run at 3.75 V had been taken
+as proof of an always-hot feed; that inference was reasonable and did not
+survive this measurement.
+
+**The test, for any installation:** watch the slope while parked. Falling means
+ignition-switched. Flat or rising on a parked vehicle means always-hot — and
+then the return problem below is solved and replaced with a different one:
+roughly **1.2-1.6 Ah per day** of parasitic draw, so 8-11 Ah a week. On a
+typical truck battery that is around three weeks of standing before you are at
+half capacity. Fine for a daily driver, a real risk at an airport car park.
 
 Note also that the cell was holding at 3.75-3.85 V rather than a topped-up
 4.2 V, so the *reserve* is partial: if the external feed is cut, expect

@@ -218,15 +218,34 @@ The node's power path decides whether anything is captured at all. The PiSugar 2
 (IP5209) **cannot power the Pi back on** after it cuts, so a node that powers
 down stays down until somebody reaches the vehicle. Two drives were lost to this.
 
-Since measured on the vehicle: the node ran **16 h 42 min including overnight**
-with the cell holding 3.75 V and rising at one point, which is only possible on
-external power — the pack alone would be flat in six to eight hours. So the
-return problem is currently solved by wiring rather than by software.
+An earlier reading of this was **wrong, and is corrected here.** The node once
+ran 16 h 42 min including overnight with the cell holding 3.75 V, and that was
+taken as proof of an always-hot external feed, on the reasoning that the pack
+alone would be flat in six to eight hours. The reasoning was sound; the
+conclusion did not survive a measurement.
 
-That trades it for a parasitic draw of roughly 1.2–1.6 Ah per day if the feed is
-always-hot rather than ignition-switched. Neither is this project's to choose;
-both are in [`RUNBOOK.md`](RUNBOOK.md), "Troubleshooting", with the commands to
-tell which one you have.
+The cell was logged for 3¼ hours against the vehicle's actual state:
+
+| time (local) | volts | rate | vehicle |
+|---|---|---|---|
+| 08:26 | 4.161 | — | parked |
+| 09:08–09:22 | 4.179 | **+0.13 V/h** | **engine running** |
+| 10:18 | 3.966 | −0.242 V/h | parked |
+| 11:47 | 3.769 | −0.145 V/h | parked |
+
+The only interval in which the cell gained charge is the drive. **The feed is
+ignition-switched**, so the node charges while the engine runs and discharges
+whenever it does not — roughly **−0.145 V/h**, which is about two and a half
+hours from a parked 3.77 V to the 3.40 V action threshold, and six to eight
+hours from full. So the "solved by wiring" conclusion above was premature: the
+return problem is not solved, it is merely deferred by however long the pack
+lasts.
+
+There is consequently **no parasitic-draw trade-off to weigh** — the earlier
+1.2–1.6 Ah/day figure applied only to an always-hot feed, which this is not.
+[`RUNBOOK.md`](RUNBOOK.md), "Troubleshooting", has the commands to tell which
+one a given installation has; the discharge slope while parked is the test, and
+a flat or rising cell on a parked vehicle is the signature of always-hot.
 
 **Recorded defects**
 
