@@ -106,6 +106,7 @@ non-adjacent encoding would defeat a substring search regardless.
 |---|---|
 | **A position sample on demand** | Create a mark, read it, delete it. ~10 s per cycle, one flash write per sample. Measured to 3.8 m. §13.11, §15.3 |
 | **A 1 Hz stream of nearby saved points** | The POI characteristic notifies once a second with the whole current window. Coordinates of *saved places near you*, not of the vehicle. §16.2, §17.1 |
+| **Where a radar source was detected** | With `gnss.record_coordinates` on, every alert row carries the fix current when it fired. Read it back with `history events --full`. To map the *source*, take the highest-`strength` `alert_update`, not the `alert_end` — by the end you have driven past it |
 | **Continuous vehicle position** | Not from the detector. Use a USB GNSS receiver — proven on hardware (§20). Position is stored only if you opt in with `record_coordinates` |
 
 ### What you cannot get

@@ -209,16 +209,27 @@ record_detector_motion = true   # needed for V1; position-adjacent, opt-in
 
 [gnss]
 enabled = true           # an independent reference for V1
-record_coordinates = false      # keep it false; see below
+record_coordinates = false      # false for V1; see below
 ```
 
-Leave `gnss.record_coordinates` **false**. The gpsd client still reports fix
-mode, satellite count, speed and course with it off, which is everything V1
-needs, and it never records where the vehicle was. Two further reasons: the
-history's `lat`/`lon` columns stay null, and `uniden-r8 history events --json`
-refuses to print a document containing a coordinate — the refusal arrives as an
-uncaught `PublicationRefused` traceback, which is a poor way to discover it in a
-car park.
+Leave `gnss.record_coordinates` **false for V1**. The gpsd client still reports
+fix mode, satellite count, speed and course with it off, which is everything V1
+needs, and it never records where the vehicle was. V1 was run that way and
+passed: see §20 of [`EVIDENCE.md`](EVIDENCE.md).
+
+That is advice about *this test*, not about the setting. Turning it on is a
+supported mode with a real purpose — an alert row then carries the fix that was
+current when it fired, which is what mapping where a source sits requires — and
+`history --full` exists to read those columns back. It is opt-in because it
+writes down where the vehicle went, not because anything breaks.
+
+**Mapping a source is not the same as reading one row.** An `alert_end` row
+carries the position at the moment the threat *cleared* — by then the vehicle
+has driven past the source, so it is the worst point in the encounter to plot.
+The `alert_update` rows each carry their own position and strength, so the
+closest approach is the update with the highest `strength`, and that is the
+estimate to map. The tracker keeps `max_strength` as a value but attaches no
+position to it, so the derivation has to be done at read time.
 
 ---
 
@@ -1212,7 +1223,7 @@ will be met by somebody standing at the car.
 | ~~`LiveSession._render_detail` reads POI attributes `PoiWarning` does not have~~ **— was never true** | Checked against the code: `_render_detail` reads `poi.active` and `poi.raw`, both of which exist. `live --full` does not raise | None needed |
 | ~~`_safe_word` rejects any string containing a comma~~ **— resolved** | Telemetry field 1's active form used to be recorded as `raw: null`, with no other trace kept under `collect` | `_parse_poi_group` now sanitises with `_safe_group()`, which keeps the comma structure per sub-field; the text is also persisted to `telemetry.poi_raw`. See the rewritten V7 |
 | ~~`HistoryWriter.record_fix` is never called~~ **— was never true** | Traced end to end: `collector._record_history_fix` calls it whenever history *and* `gnss` are both enabled and a fix is present. The table was empty on hardware because no GNSS receiver was attached, which is the designed outcome, not a defect. A regression test now proves both directions | None needed |
-| `uniden-r8 history events --json` runs the rows through `publish()`, which refuses a document containing a coordinate | An uncaught `PublicationRefused` traceback when `record_coordinates` was on | Keep `record_coordinates = false`; the text table is unaffected |
+| ~~`uniden-r8 history events --json` runs the rows through `publish()`, which refuses a document containing a coordinate~~ **— resolved** | An uncaught `PublicationRefused` traceback when `record_coordinates` was on, which made the coordinate-recording mode unusable for the thing it exists for | The position columns are now stripped before the gate on the default surface and emitted on `--full`, the same shape as `live --full`. Verified by running it against a database holding a real coordinate: the default prints **0** `lat`/`lon` keys and exits 0, `--full` emits them in both JSON and table form |
 | ~~The text history table prints `lat`/`lon` columns that the JSON path would refuse~~ **— resolved** | The publication gate only walks *keys* when handed JSON, so the table branch fell back to a decimal-pair regex and a lone latitude column would have passed. No coordinate could actually escape with the current schema, but the two branches were not equally protected | Both branches are now gated on the structured rows, before the rendering branch |
 | ~~The docstring says 13/12/10 and `CANDIDATE_RECORD_LENGTHS` says 15/14/12~~ **— resolved, differently** | Both numbers are now on file rather than in disagreement, and the instrument reports on both instead of blessing one | `inspection.CANDIDATE_LAYOUTS` holds them as separately graded hypotheses (`whole-record`, UPSTREAM-UNVERIFIED; `payload-plus-header`, INFERENCE); `evaluate_layouts()` decides from a capture. See the rewritten V8 |
 | ~~`[collector] stale_after_seconds` is validated and never read~~ **— was never true** | Checked against the code: the configured value travels on the state object into both document builders and the display line. `STALE_AFTER_SECONDS` is its default, not a hardcoded override | None needed |
