@@ -557,9 +557,15 @@ Measured on this vehicle, one drive, three conditions (`EVIDENCE.md` §22):
 | on the dash, a floor underground | 25% | 4.0 | 14.7 dB-Hz | 39 s |
 
 Both outdoor positions hold a fix most of the time, which is exactly why "does
-it have a fix" is not the test. What moving to the dash bought is **continuity**:
-the worst uninterrupted outage fell from fifty seconds to ten. At road speed
-fifty seconds is over a mile with no position attached.
+it have a fix" is not the test.
+
+**Do not read the two outdoor rows as a verdict on mounting.** They were measured
+an hour apart on different roads, and a third window that evening — back *under*
+the dash — beat both of them, holding five to seven satellites and a 12/21 m
+error estimate against the morning's four satellites and several hundred metres.
+Conditions dominated the mounting by a wide margin, and `EVIDENCE.md` §22.6
+withdraws the conclusion this table originally carried. A real answer needs the
+same route driven twice with only the mounting changed.
 
 What it did not buy is margin. **Four satellites in every condition** — the
 exact minimum for a 3D fix — so any single loss drops it, and the geometry stays

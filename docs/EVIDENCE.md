@@ -2166,6 +2166,48 @@ C/N0 and track noise are not, and no claim is made from them.
 The underground window is 56 samples, enough to demonstrate the collapse and
 not enough to characterise it.
 
+### 22.6 The confound was not a caveat — it dominated. §22.3 is refuted.
+
+§22.5 warned that the two outdoor windows were different stretches of road and
+that surroundings were confounded with mounting position. It then judged the
+continuity difference "large enough to survive that". **A second under-dash
+window, on the drive home the same day, shows that judgement was wrong.**
+
+Same mounting, same receiver, same vehicle, moving:
+
+| window | satellites used | epx / epy |
+|---|---|---|
+| under dash, morning | 4 (239 fixes), 5 (81) | 476 / 372 m |
+| on dash, morning | 3 (4), **4 (145)**, 5 (3) | 525 / 452 m |
+| **under dash, evening** | 4 (110), **5 (880), 6 (305), 7 (84)** | **12 / 21 m** |
+
+The under-dash mounting that managed four satellites and a several-hundred-metre
+error estimate in the morning was holding **five to seven satellites and 12/21 m**
+four hours later. That is a fortyfold difference in the error estimate from a
+mounting position that did not change.
+
+So the morning's poor showing was **not** the mounting. Whatever dominated —
+route, surroundings, or the constellation's own geometry moving through the day —
+it is far larger than the effect §22.3 attributed to moving the antenna onto the
+dash.
+
+**What survives.** The morning observation itself stands: within that drive, the
+on-dash window had shorter outages than the under-dash one (16 s against 77 s
+worst case). What does not survive is the *attribution*. "Moving to the dash
+bought continuity" is withdrawn; the honest statement is that two windows an hour
+apart differed, and a third window hours later exceeded both from the position
+said to be worse.
+
+**What this costs and what it teaches.** It costs the antenna-placement
+recommendation, which is now unsupported in either direction — this data cannot
+say whether the dash is better than under it. It teaches that a single-drive A/B
+on a moving vehicle is not a controlled experiment, because the largest variable
+is the one that cannot be held still. A real answer needs the same route driven
+twice with only the mounting changed, ideally at the same hour.
+
+The underground control in §22.2 is unaffected: a 10.4 dB drop under a concrete
+deck is not a routing artifact.
+
 ---
 
 ## 23. The first Ka encounter under `cost-greedy-2`, and the first with no position
@@ -2284,3 +2326,115 @@ What remains genuinely unrecorded is narrow: at the instant of a given alert,
 write a null `gnss_mode`. The session-level check resolves it in practice, and
 no schema change is proposed on the strength of a distinction that is already
 answerable.
+
+---
+
+## 24. The first alerts that know where they happened
+
+**Grade: OBSERVED.** 2026-09-08, the drive home. Operator ground truth was
+recorded in `.private/ka-observation-20260908.txt` as it arrived, before any
+query: *"Ka 16:41 strength 1"*, then *"1642 got up to 3 35.495"*.
+
+That second report matters more than it looks. **The frequency was read off the
+detector's own display by the driver.** Every frequency claim in this project
+until now has been the decoded wire value checked against itself.
+
+### 24.1 The encounter
+
+```
+1,00,KA,1,26,35.4950,F,1&0&0&0     ... 551 snapshots ...
+23:41:32.638 .. 23:50:40 UTC   (16:41:32 local)
+0 rejected, 0 unrecognised
+```
+
+| operator said | capture says | |
+|---|---|---|
+| Ka | `KA` | ✅ |
+| strength 1 (first) | strength 1 on the opening packets | ✅ |
+| 16:41 | 16:41:32 local | ✅ |
+| **35.495 GHz, off the screen** | **`35.4950` on all 551 packets** | ✅ |
+| peak strength 3 | 3, on 10 packets | ✅ |
+
+The frequency agreement is the strongest confirmation that field has had: a
+human reading the detector's display, recorded before retrieval, matching the
+decoded value exactly.
+
+One honest discrepancy: the operator placed the peak at 16:42; the capture puts
+it at 16:43:08–16:43:12. A minute of drift in a human timestamp is unremarkable,
+and smoothing it over would be worse than recording it.
+
+| | |
+|---|---|
+| duration | **9 min 08 s** — the longest encounter captured |
+| snapshots | 551, none rejected |
+| frequency | 35.4950, constant across all 551 |
+| strength | 1 (432), 2 (109), 3 (10) |
+| direction | F (539), S (12) |
+| raw signal | 18 → 78 |
+
+35.4950 sits essentially on the 35.5 GHz US Ka allocation. That is consistent
+with police Ka and does not establish it; nothing here identifies an emitter.
+
+### 24.2 The first position-tagged alerts
+
+**15 of the 20 derived events carry a latitude.** Before this drive the count
+across the project's entire history was zero (§23.3).
+
+That is the capability the mapping work needs, demonstrated end to end: a radar
+event, a timestamp, a band, a strength and a position, written together.
+
+### 24.3 The fix flickering inside one encounter
+
+The 5 events that carry no position are not at the start and end — they are
+scattered through the middle:
+
+```
+23:42:33 pos ✓    23:42:53 pos ✗    23:43:13 pos ✓
+23:42:45 pos ✓    23:43:00 pos ✗    23:43:15 pos ✓
+23:42:48 pos ✓    23:43:08 pos ✗    23:43:18 pos ✓
+```
+
+The radar path missed nothing across that entire span — 551 consecutive packets,
+none rejected. The position path dropped in and out underneath it. This is §23.3's
+silent gap seen at close range: within a single encounter, whether a given event
+can be mapped is decided by something entirely outside the detector, and nothing
+in the event says which.
+
+### 24.4 Still no frequency jitter, and a hypothesis about why
+
+Three encounters now carry a frequency:
+
+| | peak strength | frequency behaviour |
+|---|---|---|
+| §19 | **8** | jittered 0.030 GHz, split into six tracks |
+| §23 | 1 | constant, 7 packets |
+| §24 | 3 | **constant across 551 packets** |
+
+`cost-greedy-2` widened the Ka tolerance to 0.050 GHz specifically to stop that
+0.030 GHz jitter fragmenting a track. **It remains unexercised.** Two encounters
+since the change produced no jitter at all, and 551 identical readings is a
+strong null rather than a small sample.
+
+The pattern suggests jitter belongs to the strong close pass rather than to Ka
+generally — §19 peaked at 8 bars and wandered; these peaked at 1 and 3 and did
+not. That is a hypothesis from three encounters and is recorded as one. If it
+holds, the tolerance change will only ever be tested by another close pass, and
+waiting for one is the only way to find out.
+
+### 24.5 What was lost, and why it is recorded
+
+A per-second sampler had been logging satellite counts and carrier-to-noise
+through both drives, to `/tmp`. The node rebooted overnight and `/tmp` was
+cleared, so the fine-grained signal data for the drive home is gone. The history
+database is on persistent storage and survived intact — 3,928 fixes, 878
+snapshots, 75 events — which is why §22.6's comparison could still be made.
+
+The lesson is small and worth keeping: instrumentation put somewhere volatile
+buys nothing on a node whose defining operational problem is that it loses power.
+
+The reboot itself is unexplained. The cell was at 3.708 V and falling when the
+vehicle was parked, which is consistent with the pack collapsing overnight and
+the node returning when the vehicle next supplied power — but a PiSugar 2 is not
+supposed to restore its own output (§ RUNBOOK, "Swapping to a PiSugar 3"), so
+either something else restored it or the rail never fully dropped. **Not
+established**, and worth resolving before the PiSugar 3 swap rather than after.

@@ -79,6 +79,14 @@ on for hours — the vehicle was a floor underground and the receiver had been
 unable to fix for fourteen minutes. Radar captured perfectly; the map entry
 would not exist. §23.3 has what that means for hazard mapping.
 
+**A third encounter the same evening produced the first position-tagged alerts
+in the project's history** — 15 of 20 events carrying a latitude (§24). It also
+confirmed the frequency field against the driver reading `35.495` off the
+detector's own display, matching `35.4950` on all 551 packets. The Ka tolerance
+widened in `cost-greedy-2` is **still unexercised**: 551 identical frequency
+readings is a strong null, and the jitter that motivated the change may belong
+only to strong close passes (§24.4).
+
 **Still unobserved:** more than one simultaneous threat (every packet carried a
 single active slot), and every mute code except `1`.
 
@@ -184,7 +192,7 @@ in this project's own testing (§17.3).
 | OBD-II coexistence guard | 🟡 Partial | Proven with the RFCOMM link **idle**; a drive under active polling is still outstanding |
 | MQTT + Home Assistant discovery | ⚪ Untested | Implemented, unit-tested, no broker has ever been attached |
 | Web dashboard over SSE | ⚪ Untested | Implemented, unit-tested, never run against the real feed |
-| `gpsd` client for external coordinates | ✅ Works | §20 — BU-353S4 on a drive; 535 fixes, all 3D. Supplied the reference that validated three detector fields. §22 measures how much the antenna position matters |
+| `gpsd` client for external coordinates | ✅ Works | §20 — BU-353S4 on a drive; 535 fixes, all 3D. Supplied the reference that validated three detector fields. §22 measures antenna position; §22.6 **withdraws** its conclusion — conditions dominated the mounting |
 
 ---
 
